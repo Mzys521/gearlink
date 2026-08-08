@@ -6,16 +6,13 @@ Agent 可以通过调用 load_skill 工具按需获取完整技能指令。
 """
 
 import json
-from pathlib import Path
-from typing import Optional, Union, List
+import logging
 
-from gearlink.core.memory import ShortTermMemory
-# 从工具模块导入：工具 Schema、调用函数、以及注入技能注册表的 setter
-from gearlink.core.tool import TOOL_SCHEMAS, call_tool, set_skill_registry
+from gearlink.core.memory import Memory, MemoryManager, ShortTermMemory
+from gearlink.core.tool import TOOL_SCHEMAS, call_tool
 from gearlink.exceptions import GearLinkError
 from gearlink.providers.base import ModelProvider, ModelResponse
-# 导入技能模块的核心类
-from gearlink.skills import SkillRegistry, SkillLoader, Skill
+from gearlink.utils.token_count import estimate_tokens
 
 # ------------------- 系统提示配置 -------------------
 # 基础系统提示，引导 Agent 使用工具，并告知其可通过 load_skill 获取专业知识。
@@ -29,106 +26,50 @@ BASE_SYSTEM_PROMPT = (
 # ReAct 循环最大迭代次数，防止死循环
 MAX_ITERATIONS = 10
 
+#: 工具结果写入记忆前的 token 估算上限，超出时截断防止撑爆上下文
+MAX_TOOL_RESULT_TOKENS = 2000
+
+#: 模块级日志器：记录 ReAct 循环中的工具调用等过程信息
+logger = logging.getLogger(__name__)
+
 
 class ReactAgent:
-    """
-    ReAct Agent：推理(Reason) -> 行动(Act) -> 观察(Observe) 循环。
-    集成了 Skills 模块，支持加载外部技能以扩展专业知识。
-    """
+    """ReAct Agent：推理(Reason) -> 行动(Act) -> 观察(Observe) 循环"""
 
     def __init__(
         self,
         provider: ModelProvider,
-        skills: Optional[Union[SkillRegistry, Path, List[Path]]] = None,
+        memory: Memory | MemoryManager | None = None,
+        retrieve_every_iteration: bool = False,
     ) -> None:
-        """
-        初始化 Agent。
+        """初始化 Agent。
 
         Args:
-            provider: 模型提供者实例，用于调用 LLM。
-            skills: 可选，技能来源。可以是：
-                - SkillRegistry 实例（直接使用已注册的技能）
-                - Path 或 str（单个技能目录路径）
-                - List[Path]（多个技能目录路径）
-                如果为 None，则不加载任何技能，Agent 行为与原始版本完全一致。
+            provider: 模型提供者实例。
+            memory: 记忆实现；None 时默认使用 ShortTermMemory(max_message=20)
+                并附加内置 SYSTEM_PROMPT。传入 MemoryManager 时启用长期记忆检索注入。
+            retrieve_every_iteration: 是否每轮 ReAct 迭代都携带查询注入长期记忆；
+                False 表示仅首轮注入（现状，后续轮次上下文已在短期记忆中）。
+                开启时依赖 build_context 的短期窗口去重避免重复注入。
         """
         self.provider = provider
-        self.memory = ShortTermMemory(max_message=20)
+        self.retrieve_every_iteration = retrieve_every_iteration
+        if memory is None:
+            memory = ShortTermMemory(max_message=20)
+            memory.add_message({"role": "system", "content": SYSTEM_PROMPT})
+        self.memory = memory
 
-        # ========== Skills 模块装配 ==========
-        # 1. 创建技能注册表，用于存储所有已发现技能的元数据（L1 信息）
-        self.skill_registry = SkillRegistry()
-
-        # 2. 根据传入的 skills 参数加载技能元数据
-        self._load_skills(skills)
-
-        # 3. 将技能注册表注入到工具模块，使 load_skill 工具能访问
-        #    注意：必须在工具调用前完成注入，否则 load_skill 会报错
-        set_skill_registry(self.skill_registry)
-
-        # ========== 动态构建系统提示 ==========
-        # 基础提示 + 可用技能列表（如果有）
-        system_prompt = BASE_SYSTEM_PROMPT
-        skill_list = self.skill_registry.list_all()
-        if skill_list:
-            # 构建技能列表描述，供 Agent 了解有哪些技能可用
-            prompt_append = "\n\n<available_skills>\n"
-            for skill in skill_list:
-                prompt_append += f"- {skill.name}: {skill.description}\n"
-            # 引导 Agent 如何使用这些技能
-            prompt_append += (
-                "当需要使用某个技能时，调用 `load_skill` 工具，并传入 skill_name。\n"
-                "加载后，请严格按照返回的指令执行任务。\n"
-                "</available_skills>"
-            )
-            system_prompt += prompt_append
-
-        # 将最终的系统提示存入记忆（作为第一条消息）
-        self.memory.add_message({"role": "system", "content": system_prompt})
-
-    def _load_skills(self, skills_input):
-        """
-        处理 skills 参数，将技能元数据加载到注册表中。
-        支持多种输入格式，灵活适配不同使用场景。
+    def _chat(self, query: str | None = None) -> ModelResponse:
+        """基于记忆中的消息请求模型。
 
         Args:
-            skills_input: None, SkillRegistry, Path, str, 或 List[Path/str]。
+            query: 语义检索查询；仅对 MemoryManager 生效，用于注入长期记忆相关历史。
         """
-        # 未提供技能，直接返回
-        if skills_input is None:
-            return
-
-        # 如果直接传入 SkillRegistry，则直接使用，不再扫描文件系统
-        if isinstance(skills_input, SkillRegistry):
-            self.skill_registry = skills_input
-            return
-
-        # 统一转换为 Path 列表
-        if isinstance(skills_input, (Path, str)):
-            paths = [Path(skills_input)]
-        elif isinstance(skills_input, list):
-            paths = [Path(p) for p in skills_input]
+        if isinstance(self.memory, MemoryManager):
+            messages = self.memory.build_context(query or "")
         else:
-            raise ValueError("skills must be SkillRegistry, Path, or list of Paths")
-
-        # 逐个路径扫描，发现并注册技能
-        for base_path in paths:
-            if not base_path.exists():
-                raise FileNotFoundError(f"Skills path {base_path} not found.")
-            # 使用 SkillLoader 扫描目录，返回 Skill 对象列表（仅含元数据，L1）
-            discovered = SkillLoader.discover_from_directory(base_path)
-            for skill in discovered:
-                self.skill_registry.register(skill)
-
-    def _chat(self) -> ModelResponse:
-        """
-        调用模型进行对话。
-        使用当前记忆中的所有消息和已注册的工具 Schema（TOOL_SCHEMAS）。
-        """
-        return self.provider.chat(
-            messages=self.memory.get_messages(),
-            tools=TOOL_SCHEMAS,  # 已包含 load_skill 工具（若已注册）
-        )
+            messages = self.memory.get_messages()
+        return self.provider.chat(messages=messages, tools=TOOL_SCHEMAS)
 
     def run(self, user_input: str) -> str:
         """
@@ -143,10 +84,10 @@ class ReactAgent:
         # 将用户输入添加到记忆
         self.memory.add_message({"role": "user", "content": user_input})
 
-        # ReAct 循环
-        for _ in range(MAX_ITERATIONS):
-            # 1. 推理：让模型根据当前上下文决定下一步（生成回复或调用工具）
-            response = self._chat()
+        for iteration in range(MAX_ITERATIONS):
+            # 默认仅首轮携带查询注入长期记忆；开启 retrieve_every_iteration 时每轮都注入
+            query = user_input if (iteration == 0 or self.retrieve_every_iteration) else None
+            response = self._chat(query=query)
 
             # 如果模型没有调用工具，说明已经生成了最终答案，直接返回
             if not response.tool_calls:
@@ -186,12 +127,17 @@ class ReactAgent:
                     result = call_tool(name, arguments)
                     # 将结果转为 JSON 字符串，以便统一存储
                     result_text = json.dumps(result, ensure_ascii=False)
+                    # 超出预算时按 4 字符/token 的启发式反推字符上限截断
+                    if estimate_tokens(result_text) > MAX_TOOL_RESULT_TOKENS:
+                        result_text = (
+                            result_text[: MAX_TOOL_RESULT_TOKENS * 4]
+                            + "\n...(工具结果过长，已截断)"
+                        )
                 except GearLinkError as e:
                     # 工具执行失败时，将错误信息作为结果返回，让模型自行处理
                     result_text = f"工具调用失败: {e}"
 
-                # 打印日志便于调试（保留原有行为）
-                print(f"[工具调用] {name}({arguments}) -> {result_text}")
+                logger.info("[工具调用] %s(%s) -> %s", name, arguments, result_text)
 
                 # 将工具执行结果作为 tool 角色消息存入记忆
                 self.memory.add_message(
@@ -209,21 +155,50 @@ class ReactAgent:
 
 # ------------------- 入口示例（方便直接运行测试） -------------------
 if __name__ == "__main__":
+    # 入口示例：core 不直接依赖 providers，仅在演示入口处导入具体实现
+    import logging
+
+    import chromadb
     from dotenv import load_dotenv
+
+    from gearlink.core.memory import LongTermMemory, MemoryManager, ShortTermMemory
     from gearlink.providers.openai_provider import OpenAIProvider
 
-    load_dotenv()  # 加载 .env 配置（如 DEEPSEEK_API_KEY）
+    logging.basicConfig(level=logging.INFO)  # 展示记忆沉淀/检索/去重/裁剪日志
+    load_dotenv()  # 加载项目根目录 .env 中的配置（如 DEEPSEEK_API_KEY）
 
-    # 实例化 Agent，装配示例技能（基于本文件定位，不依赖运行时工作目录）
-    skill_dir = Path(__file__).resolve().parents[1] / "examples" / "skill_demo"
-    agent = ReactAgent(
-        provider=OpenAIProvider(),
-        skills=skill_dir,  # 技能目录：gearlink/examples/skill_demo
+    # 长期记忆：chromadb 向量库持久化到 .chroma/（首次运行会下载嵌入模型）
+    vector_db = chromadb.PersistentClient(path=".chroma")
+    long_term = LongTermMemory(vector_db=vector_db, collection_name="chat_history")
+
+    # 会话摘要生成器：应用层组装，调用同一模型做一次独立摘要请求（core 不依赖 providers）
+    summarizer_provider = OpenAIProvider()
+
+    def summarize(transcript: str) -> str:
+        response = summarizer_provider.chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "请用简体中文简要总结以下对话的要点，不超过 100 字。",
+                },
+                {"role": "user", "content": transcript},
+            ]
+        )
+        return response.content or ""
+
+    memory = MemoryManager(
+        short_term=ShortTermMemory(max_message=20),
+        long_term=long_term,
+        max_context_tokens=4000,
+        summarizer=summarize,
     )
+    memory.add_message({"role": "system", "content": SYSTEM_PROMPT})
 
-    # 交互式循环
+    agent = ReactAgent(provider=OpenAIProvider(), memory=memory)
+
     while True:
         user_input = input("用户: ")
         if user_input == "exit":
+            memory.end_session()  # 结束会话：沉淀会话摘要并补沉淀剩余上下文
             break
         print("助手:", agent.run(user_input))
