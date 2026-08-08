@@ -10,12 +10,16 @@
 - [x] `core/agent.py` 扁平导入改为 `from gearlink.core.tool import ...` 等完整包路径
 - [x] 建立统一异常层次 `gearlink/exceptions.py`（`GearLinkError` 体系），provider/tool 调用均包装第三方异常
 - [x] 补充 `tests/` 基础测试用例（memory / tool / agent / provider，外部服务全部 mock）
+- [x] `ShortTermMemory` 实现按 `max_tokens` 的截断逻辑（`utils/` 启发式 token 计数）
+- [x] `MemoryManager` 支持 `max_context_tokens` 分层预算分配（系统消息优先、长期检索占 `RETRIEVAL_BUDGET_RATIO`、短期对话从最新保留）
+- [x] `MemoryManager` 检索结果按 role 带说话人标签结构化注入（`[用户]` / `[助手]`，未知角色回退原始 role）
+- [x] `MemoryManager` 检索结果过滤与短期窗口内容重复的条目（去重，消除即时沉淀导致的上下文冗余）
+- [x] `ReactAgent` 工具结果写入记忆前按 `MAX_TOOL_RESULT_TOKENS` 截断
 
 ## 待办
 
 ### 代码完善
 
-- [ ] `ShortTermMemory`：实现按 `max_tokens` 的截断逻辑
 - [x] `LongTermMemory`：实现 `add_message` / `get_messages` / `clear`（基于 chromadb 向量检索）
 - [x] `MemoryManager`：实现短期 + 长期记忆的组合管理（`add_message` / `build_context` / `end_session` / `clear`），并支持通过 `ReactAgent(memory=...)` 注入
 - [ ] `ReactAgent`：`print` 日志替换为标准库 `logging`

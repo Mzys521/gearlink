@@ -4,6 +4,7 @@ from gearlink.core.memory import Memory, MemoryManager, ShortTermMemory
 from gearlink.core.tool import TOOL_SCHEMAS, call_tool
 from gearlink.exceptions import GearLinkError
 from gearlink.providers.base import ModelProvider, ModelResponse
+from gearlink.utils.token_count import estimate_tokens
 
 
 SYSTEM_PROMPT = (
@@ -11,6 +12,9 @@ SYSTEM_PROMPT = (
     "当需要实时信息（如当前时间）时，请调用可用的工具，而不是凭空回答。"
 )
 MAX_ITERATIONS = 10
+
+#: 工具结果写入记忆前的 token 估算上限，超出时截断防止撑爆上下文
+MAX_TOOL_RESULT_TOKENS = 2000
 
 
 class ReactAgent:
@@ -87,6 +91,12 @@ class ReactAgent:
                 try:
                     result = call_tool(name, arguments)
                     result_text = json.dumps(result, ensure_ascii=False)
+                    # 超出预算时按 4 字符/token 的启发式反推字符上限截断
+                    if estimate_tokens(result_text) > MAX_TOOL_RESULT_TOKENS:
+                        result_text = (
+                            result_text[: MAX_TOOL_RESULT_TOKENS * 4]
+                            + "\n...(工具结果过长，已截断)"
+                        )
                 except GearLinkError as e:
                     # 工具失败属可恢复信号：写回消息交给模型处理，不中断循环
                     result_text = f"工具调用失败: {e}"
@@ -107,13 +117,30 @@ class ReactAgent:
 
 if __name__ == "__main__":
     # 入口示例：core 不直接依赖 providers，仅在演示入口处导入具体实现
+    import logging
+
+    import chromadb
     from dotenv import load_dotenv
 
+    from gearlink.core.memory import LongTermMemory, MemoryManager, ShortTermMemory
     from gearlink.providers.openai_provider import OpenAIProvider
 
+    logging.basicConfig(level=logging.INFO)  # 展示记忆沉淀/检索/去重/裁剪日志
     load_dotenv()  # 加载项目根目录 .env 中的配置（如 DEEPSEEK_API_KEY）
 
-    agent = ReactAgent(provider=OpenAIProvider())
+    # 长期记忆：chromadb 向量库持久化到 .chroma/（首次运行会下载嵌入模型）
+    vector_db = chromadb.PersistentClient(path=".chroma")
+    long_term = LongTermMemory(vector_db=vector_db, collection_name="chat_history")
+
+    memory = MemoryManager(
+        short_term=ShortTermMemory(max_message=20),
+        long_term=long_term,
+        max_context_tokens=4000,
+    )
+    memory.add_message({"role": "system", "content": SYSTEM_PROMPT})
+
+    agent = ReactAgent(provider=OpenAIProvider(), memory=memory)
+
     while True:
         user_input = input("用户: ")
         if user_input == "exit":

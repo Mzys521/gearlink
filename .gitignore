@@ -14,6 +14,7 @@ env/
 .env
 # ---- 向量数据库本地数据 ----
 chromadb/
+.chroma/
 *.sqlite3
 
 # ---- IDE / 编辑器 ----

@@ -1,3 +1,4 @@
+import logging
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -5,9 +6,38 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from gearlink.exceptions import MemoryError
+from gearlink.utils.token_count import count_message_tokens, estimate_tokens
 
 if TYPE_CHECKING:
     import chromadb
+
+#: 模块级日志器：记录短期记忆截断、长期记忆沉淀/检索与上下文组装过程
+logger = logging.getLogger(__name__)
+
+#: 日志中展示消息内容的预览长度，避免超长内容刷屏
+_LOG_PREVIEW_LENGTH = 60
+
+
+def _preview(text: str, length: int = _LOG_PREVIEW_LENGTH) -> str:
+    """截断文本用于日志展示。
+
+    Args:
+        text: 原始文本。
+        length: 预览长度上限。
+
+    Returns:
+        截断后的预览文本，超出部分以省略号结尾。
+    """
+    if len(text) <= length:
+        return text
+    return text[:length] + "..."
+
+
+#: 长期记忆检索结果在上下文总预算中的最大占比，超出部分按相关度裁剪
+RETRIEVAL_BUDGET_RATIO = 0.25
+
+#: 检索注入时各角色对应的说话人显示名（未知角色回退为原始 role 值）
+_ROLE_LABELS = {"user": "用户", "assistant": "助手"}
 
 
 class Memory(ABC):
@@ -44,7 +74,8 @@ class ShortTermMemory(Memory):
         """初始化短期记忆。
 
         Args:
-            max_tokens: 保留的最大 token 数（暂未实现截断）。
+            max_tokens: 保留的最大 token 数；超出时从最旧消息开始移除，
+                至少保留最新一条消息。None 表示不按 token 数裁剪。
             max_message: 保留的最大消息数，超出时移除最早的消息。
         """
         self.max_messages = max_message
@@ -54,16 +85,38 @@ class ShortTermMemory(Memory):
     def add_message(self, message: dict[str, Any]) -> None:
         """添加一条消息到短期记忆。
 
+        超出 max_message 条数或 max_tokens 预算时，从最旧消息开始移除；
+        单条消息自身超出预算时仍保留最新一条，避免清空记忆。
+
         Args:
             message: OpenAI 消息格式字典。
         """
         self.messages.append(message)
 
-        # 超出上限时移除最早的消息
+        # 超出条数上限时移除最早的消息
         if self.max_messages and len(self.messages) > self.max_messages:
+            removed = len(self.messages) - self.max_messages
             self.messages = self.messages[-self.max_messages :]
+            logger.debug(
+                "短期记忆按条数上限截断: 移除 %d 条最旧消息（上限 %d 条）",
+                removed,
+                self.max_messages,
+            )
 
-        # TODO: token 计数截断逻辑
+        # 超出 token 预算时按总量递减，从最旧消息开始移除
+        if self.max_tokens:
+            total = sum(count_message_tokens(m) for m in self.messages)
+            removed = 0
+            while total > self.max_tokens and len(self.messages) > 1:
+                removed_message = self.messages.pop(0)
+                total -= count_message_tokens(removed_message)
+                removed += 1
+            if removed:
+                logger.debug(
+                    "短期记忆按 token 预算截断: 移除 %d 条最旧消息（预算 %d token）",
+                    removed,
+                    self.max_tokens,
+                )
 
     def get_messages(self, limit: int | None = None) -> list[dict[str, Any]]:
         """获取最近的对话消息。
@@ -93,6 +146,8 @@ class MemoryManager:
       会话结束时可调用 :meth:`end_session` 将短期记忆中剩余的消息补沉淀后清空短期。
     - :meth:`build_context` 将长期记忆的 top-k 语义检索结果以 system 消息注入
       短期消息头部，组装出本轮请求的完整消息列表。
+    - 配置 ``max_context_tokens`` 后，组装结果按「系统消息优先、长期检索固定
+      占比、短期对话从最新保留」的顺序裁剪，确保请求不超出上下文预算。
 
     注意：本类是组合器而非 ``Memory`` 子类——它不对齐 ``Memory`` 抽象的三方法签名，
     而是提供更贴合「短期 + 长期」场景的专用接口（`build_context` / `end_session`）。
@@ -106,6 +161,7 @@ class MemoryManager:
         short_term: Memory,
         long_term: "LongTermMemory | None" = None,
         relevant_limit: int = 5,
+        max_context_tokens: int | None = None,
     ) -> None:
         """初始化记忆管理器。
 
@@ -113,10 +169,14 @@ class MemoryManager:
             short_term: 短期记忆实例，承载当下对话消息。
             long_term: 长期记忆实例；None 表示不启用语义检索与沉淀。
             relevant_limit: build_context 检索长期记忆时的默认 top-k 条数。
+            max_context_tokens: 组装上下文的 token 预算上限；None 表示不设限。
+                预算分配顺序为系统消息优先保留、长期检索占固定比例
+                （RETRIEVAL_BUDGET_RATIO）、短期对话从最新消息向前填充。
         """
         self.short_term = short_term
         self.long_term = long_term
         self.relevant_limit = relevant_limit
+        self.max_context_tokens = max_context_tokens
 
     def add_message(self, message: dict[str, Any]) -> None:
         """写入一条消息：必进短期记忆，按策略选择性沉淀到长期记忆。
@@ -137,7 +197,14 @@ class MemoryManager:
             and message.get("role") in self._SEDIMENT_ROLES
             and message.get("content")
         ):
+            logger.debug(
+                "沉淀到长期记忆: role=%s, content=%s",
+                message["role"],
+                _preview(message["content"]),
+            )
             self.long_term.add_message({"role": message["role"], "content": message["content"]})
+        elif self.long_term is not None:
+            logger.debug("跳过沉淀: role=%r（非 user/assistant 或空内容）", message.get("role"))
 
     def end_session(self) -> None:
         """结束会话：将短期记忆中尚未沉淀的消息补写入长期记忆，然后清空短期记忆。
@@ -150,19 +217,26 @@ class MemoryManager:
             MemoryError: 长期记忆写入失败时抛出。
         """
         if self.long_term is not None:
+            sedimented = 0
             for message in self.short_term.get_messages():
                 content = message.get("content")
                 if content:
                     self.long_term.add_message(
                         {"role": message.get("role", "user"), "content": content}
                     )
+                    sedimented += 1
+            if sedimented:
+                logger.info("会话结束: 补沉淀 %d 条短期记忆到长期记忆", sedimented)
         self.short_term.clear()
 
     def build_context(self, query: str, relevant_limit: int | None = None) -> list[dict[str, Any]]:
         """组装本轮请求的消息列表：长期记忆检索结果注入 + 短期记忆全量。
 
-        检索到的相关历史以 system 消息形式插入短期消息头部；未配置长期记忆
-        或 query 为空时仅返回短期记忆全量消息。
+        检索到的相关历史以 system 消息形式插入短期消息头部，每条带说话人标签
+        （如 [用户] / [助手]），且过滤掉与短期窗口内容重复的条目；未配置长期
+        记忆或 query 为空时仅返回短期记忆全量消息。配置了 max_context_tokens
+        时，按「系统消息优先保留、长期检索占固定比例、短期消息从最新保留」
+        的顺序裁剪，确保请求不超出上下文预算。
 
         Args:
             query: 语义检索查询文本（通常为本轮用户输入）。
@@ -179,16 +253,141 @@ class MemoryManager:
         if self.long_term is not None and query:
             limit = self.relevant_limit if relevant_limit is None else relevant_limit
             entries = self.long_term.get_relevant_messages(query, limit=limit)
+            logger.debug("长期记忆检索: query=%r, top-k=%d, 命中 %d 条", query, limit, len(entries))
+            entries = self._dedupe_against_short_term(entries)
+            entries = self._fit_retrieval_budget(entries)
             if entries:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": "以下是与当前问题相关的历史记忆：\n"
-                        + "\n".join(f"- {entry.content}" for entry in entries),
-                    }
+                retrieval_content = "以下是与当前问题相关的历史记忆：\n" + "\n".join(
+                    self._format_retrieved_entry(entry) for entry in entries
+                )
+                messages.append({"role": "system", "content": retrieval_content})
+                logger.info(
+                    "注入长期记忆 %d 条（约 %d token）: %s",
+                    len(entries),
+                    estimate_tokens(retrieval_content),
+                    " | ".join(_preview(entry.content) for entry in entries),
                 )
 
         messages.extend(self.short_term.get_messages())
+
+        if self.max_context_tokens is not None:
+            messages = self._trim_to_budget(messages, self.max_context_tokens)
+        return messages
+
+    def _dedupe_against_short_term(self, entries: "list[MemoryEntry]") -> "list[MemoryEntry]":
+        """过滤掉与短期窗口内容重复的检索条目，避免同一内容注入两次。
+
+        短期与长期记忆共享同一写入内容（即时沉淀），此处做精确内容匹配去重，
+        消除 top-k 检索与滑窗之间天然重叠的上下文冗余。
+
+        Args:
+            entries: 检索结果列表。
+
+        Returns:
+            去除与短期记忆内容重复后的条目列表。
+        """
+        short_term_contents = {
+            message.get("content")
+            for message in self.short_term.get_messages()
+            if message.get("content")
+        }
+        kept = [entry for entry in entries if entry.content not in short_term_contents]
+        for entry in entries:
+            if entry.content in short_term_contents:
+                logger.debug(
+                    "检索去重: 过滤与短期窗口重复的记忆 role=%s content=%s",
+                    entry.role,
+                    _preview(entry.content),
+                )
+        if len(kept) != len(entries):
+            logger.info(
+                "检索去重: 过滤 %d 条与短期窗口重复的记忆，保留 %d 条",
+                len(entries) - len(kept),
+                len(kept),
+            )
+        return kept
+
+    def _format_retrieved_entry(self, entry: "MemoryEntry") -> str:
+        """将一条检索到的长期记忆格式化为带说话人标签的文本。
+
+        Args:
+            entry: 检索结果条目。
+
+        Returns:
+            形如 ``- [用户]：内容`` 的注入文本；未知角色回退为原始 role 值。
+        """
+        label = _ROLE_LABELS.get(entry.role, entry.role)
+        return f"- [{label}]：{entry.content}"
+
+    def _fit_retrieval_budget(self, entries: "list[MemoryEntry]") -> "list[MemoryEntry]":
+        """按检索预算裁剪长期记忆条目，超出部分从最不相关的一端裁剪。
+
+        Args:
+            entries: 按相关度从高到低排列的检索结果。
+
+        Returns:
+            预算内保留的条目；未配置 max_context_tokens 时原样返回。
+        """
+        if self.max_context_tokens is None:
+            return entries
+        quota = int(self.max_context_tokens * RETRIEVAL_BUDGET_RATIO)
+        kept: list[MemoryEntry] = []
+        total = 0
+        for entry in entries:
+            tokens = estimate_tokens(entry.content)
+            # 首条即使超预算也保留（软约束），其余超出即停止
+            if total + tokens > quota and kept:
+                break
+            kept.append(entry)
+            total += tokens
+        logger.debug(
+            "检索预算裁剪: 配额 %d token（总预算 %d），保留 %d/%d 条",
+            quota,
+            self.max_context_tokens,
+            len(kept),
+            len(entries),
+        )
+        return kept
+
+    def _trim_to_budget(self, messages: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
+        """在 token 预算内裁剪消息：system 消息始终保留，其余从最旧开始丢弃。
+
+        兜底策略：若裁剪后没有任何消息（无 system 消息且其余全部超出预算），
+        保留最新一条，避免向模型发出空请求。
+
+        Args:
+            messages: 组装完成的消息列表。
+            budget: 上下文总预算。
+
+        Returns:
+            裁剪后不超出预算的消息列表。
+        """
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        others = [m for m in messages if m.get("role") != "system"]
+        remaining = budget - sum(count_message_tokens(m) for m in system_msgs)
+        kept: list[dict[str, Any]] = []
+        total = 0
+        for message in reversed(others):
+            tokens = count_message_tokens(message)
+            if total + tokens > remaining:
+                break
+            kept.append(message)
+            total += tokens
+        kept.reverse()
+
+        messages = system_msgs + kept
+        # 兜底：整体为空时保留最新一条，避免空请求
+        if not messages and others:
+            messages = [others[-1]]
+        logger.info(
+            "上下文预算裁剪: 预算 %d token，裁剪前 %d 条（约 %d token），"
+            "裁剪后 %d 条（约 %d token）",
+            budget,
+            len(system_msgs) + len(others),
+            sum(count_message_tokens(m) for m in (system_msgs + others)),
+            len(messages),
+            sum(count_message_tokens(m) for m in messages),
+        )
         return messages
 
     def clear(self) -> None:
