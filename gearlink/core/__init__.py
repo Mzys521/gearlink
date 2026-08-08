@@ -4,13 +4,20 @@ core 只面向抽象编程，不得依赖 providers/skills/tools 中的具体实
 """
 
 from gearlink.core.agent import ReactAgent
-from gearlink.core.memory import LongTermMemory, Memory, MemoryEntry, ShortTermMemory
+from gearlink.core.memory import (
+    LongTermMemory,
+    Memory,
+    MemoryEntry,
+    MemoryManager,
+    ShortTermMemory,
+)
 from gearlink.core.tool import TOOL_REGISTRY, TOOL_SCHEMAS, call_tool, register_tool
 
 __all__ = [
     "ReactAgent",
     "Memory",
     "MemoryEntry",
+    "MemoryManager",
     "ShortTermMemory",
     "LongTermMemory",
     "TOOL_REGISTRY",

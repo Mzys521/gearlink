@@ -17,7 +17,7 @@
 
 - [ ] `ShortTermMemory`：实现按 `max_tokens` 的截断逻辑
 - [x] `LongTermMemory`：实现 `add_message` / `get_messages` / `clear`（基于 chromadb 向量检索）
-- [ ] `MemoryManager`：实现短期 + 长期记忆的组合管理
+- [x] `MemoryManager`：实现短期 + 长期记忆的组合管理（`add_message` / `build_context` / `end_session` / `clear`），并支持通过 `ReactAgent(memory=...)` 注入
 - [ ] `ReactAgent`：`print` 日志替换为标准库 `logging`
 - [ ] `skills/`：确定技能扩展契约（接口设计规范 §4 标注「待定」），并在文档中补齐
 - [x] `tools/`：将内置工具（如 `get_current_time`）从 `core/tool.py` 迁移到 `tools/`，core 仅保留注册表与调度器（含 `register_tool` 显式注册函数）

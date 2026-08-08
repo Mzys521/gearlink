@@ -84,7 +84,122 @@ class ShortTermMemory(Memory):
 
 
 class MemoryManager:
-    """记忆管理器：结合短期和长期记忆（待实现）"""
+    """记忆管理器：组合短期与长期记忆，统一为 Agent 提供上下文。
+
+    职责划分：
+
+    - 短期记忆管「当下对话」：所有消息先写入短期记忆，每轮全量注入模型请求。
+    - 长期记忆管「沉淀知识」：user/assistant 的文本消息在写入时即选择性沉淀；
+      会话结束时可调用 :meth:`end_session` 将短期记忆中剩余的消息补沉淀后清空短期。
+    - :meth:`build_context` 将长期记忆的 top-k 语义检索结果以 system 消息注入
+      短期消息头部，组装出本轮请求的完整消息列表。
+
+    注意：本类是组合器而非 ``Memory`` 子类——它不对齐 ``Memory`` 抽象的三方法签名，
+    而是提供更贴合「短期 + 长期」场景的专用接口（`build_context` / `end_session`）。
+    """
+
+    #: 写入时即沉淀到长期记忆的消息角色（system/tool 消息不沉淀）
+    _SEDIMENT_ROLES = ("user", "assistant")
+
+    def __init__(
+        self,
+        short_term: Memory,
+        long_term: "LongTermMemory | None" = None,
+        relevant_limit: int = 5,
+    ) -> None:
+        """初始化记忆管理器。
+
+        Args:
+            short_term: 短期记忆实例，承载当下对话消息。
+            long_term: 长期记忆实例；None 表示不启用语义检索与沉淀。
+            relevant_limit: build_context 检索长期记忆时的默认 top-k 条数。
+        """
+        self.short_term = short_term
+        self.long_term = long_term
+        self.relevant_limit = relevant_limit
+
+    def add_message(self, message: dict[str, Any]) -> None:
+        """写入一条消息：必进短期记忆，按策略选择性沉淀到长期记忆。
+
+        沉淀策略：role 为 user/assistant 且含非空 content 的文本消息立即沉淀；
+        system/tool 消息与工具调用中间态不沉淀（避免噪声）。
+
+        Args:
+            message: OpenAI 消息格式字典，须包含 role 字段。
+
+        Raises:
+            MemoryError: 长期记忆写入失败时抛出（短期记忆已写入成功）。
+        """
+        self.short_term.add_message(message)
+
+        if (
+            self.long_term is not None
+            and message.get("role") in self._SEDIMENT_ROLES
+            and message.get("content")
+        ):
+            self.long_term.add_message({"role": message["role"], "content": message["content"]})
+
+    def end_session(self) -> None:
+        """结束会话：将短期记忆中尚未沉淀的消息补写入长期记忆，然后清空短期记忆。
+
+        与 :meth:`add_message` 的即时沉淀配合使用：user/assistant 文本消息已沉淀，
+        此处主要补齐 system/tool 等会话过程消息，保证长期记忆不丢失本轮上下文。
+        未配置长期记忆时仅清空短期记忆。
+
+        Raises:
+            MemoryError: 长期记忆写入失败时抛出。
+        """
+        if self.long_term is not None:
+            for message in self.short_term.get_messages():
+                content = message.get("content")
+                if content:
+                    self.long_term.add_message(
+                        {"role": message.get("role", "user"), "content": content}
+                    )
+        self.short_term.clear()
+
+    def build_context(self, query: str, relevant_limit: int | None = None) -> list[dict[str, Any]]:
+        """组装本轮请求的消息列表：长期记忆检索结果注入 + 短期记忆全量。
+
+        检索到的相关历史以 system 消息形式插入短期消息头部；未配置长期记忆
+        或 query 为空时仅返回短期记忆全量消息。
+
+        Args:
+            query: 语义检索查询文本（通常为本轮用户输入）。
+            relevant_limit: 检索 top-k 条数；None 表示使用构造时的默认值。
+
+        Returns:
+            可直接传给 ModelProvider.chat 的消息列表。
+
+        Raises:
+            MemoryError: 长期记忆检索失败时抛出。
+        """
+        messages: list[dict[str, Any]] = []
+
+        if self.long_term is not None and query:
+            limit = self.relevant_limit if relevant_limit is None else relevant_limit
+            entries = self.long_term.get_relevant_messages(query, limit=limit)
+            if entries:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": "以下是与当前问题相关的历史记忆：\n"
+                        + "\n".join(f"- {entry.content}" for entry in entries),
+                    }
+                )
+
+        messages.extend(self.short_term.get_messages())
+        return messages
+
+    def clear(self) -> None:
+        """清空短期与长期记忆中的所有内容。
+
+        Raises:
+            MemoryError: 长期记忆清空失败时抛出。
+        """
+        self.short_term.clear()
+        if self.long_term is not None:
+            self.long_term.clear()
 
 
 @dataclass(frozen=True)

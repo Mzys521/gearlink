@@ -1,6 +1,6 @@
 import json
 
-from gearlink.core.memory import ShortTermMemory
+from gearlink.core.memory import Memory, MemoryManager, ShortTermMemory
 from gearlink.core.tool import TOOL_SCHEMAS, call_tool
 from gearlink.exceptions import GearLinkError
 from gearlink.providers.base import ModelProvider, ModelResponse
@@ -16,24 +16,41 @@ MAX_ITERATIONS = 10
 class ReactAgent:
     """ReAct Agent：推理(Reason) -> 行动(Act) -> 观察(Observe) 循环"""
 
-    def __init__(self, provider: ModelProvider) -> None:
-        self.provider = provider
-        self.memory = ShortTermMemory(max_message=20)
-        self.memory.add_message({"role": "system", "content": SYSTEM_PROMPT})
+    def __init__(
+        self, provider: ModelProvider, memory: Memory | MemoryManager | None = None
+    ) -> None:
+        """初始化 Agent。
 
-    def _chat(self) -> ModelResponse:
-        """基于记忆中的消息请求模型"""
-        return self.provider.chat(
-            messages=self.memory.get_messages(),
-            tools=TOOL_SCHEMAS,
-        )
+        Args:
+            provider: 模型提供者实例。
+            memory: 记忆实现；None 时默认使用 ShortTermMemory(max_message=20)
+                并附加内置 SYSTEM_PROMPT。传入 MemoryManager 时启用长期记忆检索注入。
+        """
+        self.provider = provider
+        if memory is None:
+            memory = ShortTermMemory(max_message=20)
+            memory.add_message({"role": "system", "content": SYSTEM_PROMPT})
+        self.memory = memory
+
+    def _chat(self, query: str | None = None) -> ModelResponse:
+        """基于记忆中的消息请求模型。
+
+        Args:
+            query: 语义检索查询；仅对 MemoryManager 生效，用于注入长期记忆相关历史。
+        """
+        if isinstance(self.memory, MemoryManager):
+            messages = self.memory.build_context(query or "")
+        else:
+            messages = self.memory.get_messages()
+        return self.provider.chat(messages=messages, tools=TOOL_SCHEMAS)
 
     def run(self, user_input: str) -> str:
         """执行一次用户请求，内部运行 ReAct 循环直到得到最终答案"""
         self.memory.add_message({"role": "user", "content": user_input})
 
-        for _ in range(MAX_ITERATIONS):
-            response = self._chat()
+        for iteration in range(MAX_ITERATIONS):
+            # 仅首轮携带查询注入长期记忆，后续轮次上下文已在短期记忆中
+            response = self._chat(query=user_input if iteration == 0 else None)
 
             # 无工具调用 -> 模型已给出最终答案，结束循环
             if not response.tool_calls:

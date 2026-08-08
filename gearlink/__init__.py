@@ -4,7 +4,13 @@
 """
 
 from gearlink.core.agent import ReactAgent
-from gearlink.core.memory import LongTermMemory, Memory, MemoryEntry, ShortTermMemory
+from gearlink.core.memory import (
+    LongTermMemory,
+    Memory,
+    MemoryEntry,
+    MemoryManager,
+    ShortTermMemory,
+)
 from gearlink.core.tool import TOOL_REGISTRY, TOOL_SCHEMAS, call_tool, register_tool
 from gearlink.providers.base import ModelProvider, ModelResponse, ToolCall
 from gearlink.providers.openai_provider import OpenAIProvider
@@ -16,6 +22,7 @@ __all__ = [
     "ReactAgent",
     "Memory",
     "MemoryEntry",
+    "MemoryManager",
     "ShortTermMemory",
     "LongTermMemory",
     "TOOL_REGISTRY",
