@@ -1,0 +1,28 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 敏感信息（API key 等，切勿提交） ----
+.env
+.env.*
+
+# ---- 向量数据库本地数据 ----
+chromadb/
+*.sqlite3
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+.qoder/
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
