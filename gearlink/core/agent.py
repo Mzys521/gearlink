@@ -1,3 +1,10 @@
+# gearlink/core/agent.py
+"""
+ReAct Agent 实现，集成了 Skills 模块。
+支持通过技能目录加载专业知识，并在系统提示中动态注入可用技能列表，
+Agent 可以通过调用 load_skill 工具按需获取完整技能指令。
+"""
+
 import json
 import logging
 
@@ -7,11 +14,16 @@ from gearlink.exceptions import GearLinkError
 from gearlink.providers.base import ModelProvider, ModelResponse
 from gearlink.utils.token_count import estimate_tokens
 
-
-SYSTEM_PROMPT = (
+# ------------------- 系统提示配置 -------------------
+# 基础系统提示，引导 Agent 使用工具，并告知其可通过 load_skill 获取专业知识。
+BASE_SYSTEM_PROMPT = (
     "You are a helpful assistant. "
-    "当需要实时信息（如当前时间）时，请调用可用的工具，而不是凭空回答。"
+    "当需要实时信息（如当前时间）时，请调用可用的工具，而不是凭空回答。\n"
+    "当遇到需要特定专业知识（如代码审查、文档编写等）的任务时，你可以调用 `load_skill` "
+    "工具加载相应的技能指令，然后严格遵循这些指令执行。"
 )
+
+# ReAct 循环最大迭代次数，防止死循环
 MAX_ITERATIONS = 10
 
 #: 工具结果写入记忆前的 token 估算上限，超出时截断防止撑爆上下文
@@ -60,7 +72,16 @@ class ReactAgent:
         return self.provider.chat(messages=messages, tools=TOOL_SCHEMAS)
 
     def run(self, user_input: str) -> str:
-        """执行一次用户请求，内部运行 ReAct 循环直到得到最终答案"""
+        """
+        执行一次用户请求，内部运行 ReAct 循环直到得到最终答案。
+
+        Args:
+            user_input: 用户的输入文本。
+
+        Returns:
+            模型给出的最终答案文本。
+        """
+        # 将用户输入添加到记忆
         self.memory.add_message({"role": "user", "content": user_input})
 
         for iteration in range(MAX_ITERATIONS):
@@ -68,12 +89,12 @@ class ReactAgent:
             query = user_input if (iteration == 0 or self.retrieve_every_iteration) else None
             response = self._chat(query=query)
 
-            # 无工具调用 -> 模型已给出最终答案，结束循环
+            # 如果模型没有调用工具，说明已经生成了最终答案，直接返回
             if not response.tool_calls:
                 self.memory.add_message({"role": "assistant", "content": response.content})
                 return response.content
 
-            # 有工具调用 -> 记录助手的工具调用消息
+            # 2. 行动：模型决定调用工具，将工具调用记录到记忆
             self.memory.add_message(
                 {
                     "role": "assistant",
@@ -92,16 +113,19 @@ class ReactAgent:
                 }
             )
 
-            # 逐个执行工具调用，并将结果写回记忆
+            # 3. 观察：执行每个工具调用，并将结果写回记忆
             for tool_call in response.tool_calls:
                 name = tool_call.name
+                # 解析参数（若解析失败则使用空字典）
                 try:
                     arguments = json.loads(tool_call.arguments or "{}")
                 except json.JSONDecodeError:
                     arguments = {}
 
+                # 执行工具（call_tool 会从 TOOL_REGISTRY 中查找并调用）
                 try:
                     result = call_tool(name, arguments)
+                    # 将结果转为 JSON 字符串，以便统一存储
                     result_text = json.dumps(result, ensure_ascii=False)
                     # 超出预算时按 4 字符/token 的启发式反推字符上限截断
                     if estimate_tokens(result_text) > MAX_TOOL_RESULT_TOKENS:
@@ -110,11 +134,12 @@ class ReactAgent:
                             + "\n...(工具结果过长，已截断)"
                         )
                 except GearLinkError as e:
-                    # 工具失败属可恢复信号：写回消息交给模型处理，不中断循环
+                    # 工具执行失败时，将错误信息作为结果返回，让模型自行处理
                     result_text = f"工具调用失败: {e}"
 
                 logger.info("[工具调用] %s(%s) -> %s", name, arguments, result_text)
 
+                # 将工具执行结果作为 tool 角色消息存入记忆
                 self.memory.add_message(
                     {
                         "role": "tool",
@@ -122,11 +147,13 @@ class ReactAgent:
                         "content": result_text,
                     }
                 )
-            # 携带工具结果进入下一轮推理
+            # 循环继续，模型将基于工具结果进行下一轮推理
 
+        # 达到最大迭代次数仍未得到答案
         return "已达到最大推理轮数，无法得出最终答案。"
 
 
+# ------------------- 入口示例（方便直接运行测试） -------------------
 if __name__ == "__main__":
     # 入口示例：core 不直接依赖 providers，仅在演示入口处导入具体实现
     import logging
