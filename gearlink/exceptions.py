@@ -22,3 +22,24 @@ class ToolNotFoundError(ToolError):
 
 class MemoryError(GearLinkError):
     """记忆读写失败"""
+
+# ========== Skill 相关异常 ==========
+class SkillError(GearLinkError):
+    """所有 Skill 相关异常的基类"""
+    pass
+
+class SkillNotFoundError(SkillError):
+    """按名称查找技能时未找到"""
+    pass
+
+class SkillLoadError(SkillError):
+    """加载技能内容（如 SKILL.md 解析失败）时抛出"""
+    pass
+
+class SkillValidationError(SkillError):
+    """技能元数据（YAML frontmatter）验证失败"""
+    pass
+
+class SkillExecutionError(SkillError):
+    """执行技能辅助脚本时出错"""
+    pass
