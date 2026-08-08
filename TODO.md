@@ -15,6 +15,11 @@
 - [x] `MemoryManager` 检索结果按 role 带说话人标签结构化注入（`[用户]` / `[助手]`，未知角色回退原始 role）
 - [x] `MemoryManager` 检索结果过滤与短期窗口内容重复的条目（去重，消除即时沉淀导致的上下文冗余）
 - [x] `ReactAgent` 工具结果写入记忆前按 `MAX_TOOL_RESULT_TOKENS` 截断
+- [x] `MemoryManager`：`end_session` 支持注入 `summarizer` 沉淀会话摘要（`[会话摘要]` 前缀，失败不中断会话结束）
+- [x] `MemoryManager`：新增 `system_budget_ratio` 非检索 system 消息预算上限（检索注入消息受保护）
+- [x] `LongTermMemory`：新增 `recency_weight` 时间衰减排序与 `max_entries` 容量上限淘汰
+- [x] `LongTermMemory`：新增 `dedupe` 写入去重（sha256 `content_hash`）与检索结果去重
+- [x] `ReactAgent`：新增 `retrieve_every_iteration` 每轮长期记忆检索注入开关
 
 ## 待办
 
@@ -22,7 +27,7 @@
 
 - [x] `LongTermMemory`：实现 `add_message` / `get_messages` / `clear`（基于 chromadb 向量检索）
 - [x] `MemoryManager`：实现短期 + 长期记忆的组合管理（`add_message` / `build_context` / `end_session` / `clear`），并支持通过 `ReactAgent(memory=...)` 注入
-- [ ] `ReactAgent`：`print` 日志替换为标准库 `logging`
+- [x] `ReactAgent`：`print` 日志替换为标准库 `logging`
 - [ ] `skills/`：确定技能扩展契约（接口设计规范 §4 标注「待定」），并在文档中补齐
 - [x] `tools/`：将内置工具（如 `get_current_time`）从 `core/tool.py` 迁移到 `tools/`，core 仅保留注册表与调度器（含 `register_tool` 显式注册函数）
 
