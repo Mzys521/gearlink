@@ -4,7 +4,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-
+tests/*
 # ---- 虚拟环境 ----
 .venv/
 venv/
@@ -12,8 +12,6 @@ env/
 
 # ---- 敏感信息（API key 等，切勿提交） ----
 .env
-.env.*
-
 # ---- 向量数据库本地数据 ----
 chromadb/
 *.sqlite3

@@ -1,0 +1,41 @@
+# 打包与工具链配置（单一事实来源），遵循 docs/开发规范.md
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gearlink"
+version = "0.1.0"
+description = "轻量级 Agent 框架：ReAct 循环、可插拔模型提供者与工具注册表"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=2.48.0",
+    "fastmcp>=3.4.4",
+    "chromadb>=1.5.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["gearlink*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle 错误
+    "W",   # pycodestyle 警告
+    "F",   # pyflakes
+    "UP",  # pyupgrade（现代语法）
+]
+# 注：导入分组顺序按开发规范手动维护（各组之间空一行），不启用 isort 规则
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

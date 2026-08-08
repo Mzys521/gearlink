@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
 class ToolCall:
     """模型返回的一次工具调用"""
+
     id: str
     name: str
     arguments: str  # JSON 字符串
@@ -14,8 +15,9 @@ class ToolCall:
 @dataclass
 class ModelResponse:
     """模型响应的统一表示"""
-    content: Optional[str] = None
-    tool_calls: List[ToolCall] = field(default_factory=list)
+
+    content: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 class ModelProvider(ABC):
@@ -24,8 +26,18 @@ class ModelProvider(ABC):
     @abstractmethod
     def chat(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
-        """根据消息列表发起一次对话，返回统一的 ModelResponse"""
-        pass
+        """根据消息列表发起一次对话。
+
+        Args:
+            messages: OpenAI 消息格式的对话历史。
+            tools: 可用工具的 schema 列表；None 表示不启用工具调用。
+
+        Returns:
+            ModelResponse: 统一响应结构，含文本内容与工具调用请求。
+
+        Raises:
+            ProviderError: 底层服务调用失败（网络、鉴权、限流等）。
+        """

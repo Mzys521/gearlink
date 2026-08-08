@@ -1,17 +1,16 @@
-from openai_provider import OpenAIProvider
-from base import ModelProvider, ModelResponse
 import json
-import os
-import sys
 
-from tool import TOOL_SCHEMAS, call_tool
-from memory import ShortTermMemory
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "providers"))
+from gearlink.core.memory import ShortTermMemory
+from gearlink.core.tool import TOOL_SCHEMAS, call_tool
+from gearlink.exceptions import GearLinkError
+from gearlink.providers.base import ModelProvider, ModelResponse
 
 
-SYSTEM_PROMPT = "You are a helpful assistant. 当需要实时信息（如当前时间）时，请调用可用的工具，而不是凭空回答。"
-MAX_ITERATIONS = 10 
+SYSTEM_PROMPT = (
+    "You are a helpful assistant. "
+    "当需要实时信息（如当前时间）时，请调用可用的工具，而不是凭空回答。"
+)
+MAX_ITERATIONS = 10
 
 
 class ReactAgent:
@@ -38,9 +37,7 @@ class ReactAgent:
 
             # 无工具调用 -> 模型已给出最终答案，结束循环
             if not response.tool_calls:
-                self.memory.add_message(
-                    {"role": "assistant", "content": response.content}
-                )
+                self.memory.add_message({"role": "assistant", "content": response.content})
                 return response.content
 
             # 有工具调用 -> 记录助手的工具调用消息
@@ -73,7 +70,8 @@ class ReactAgent:
                 try:
                     result = call_tool(name, arguments)
                     result_text = json.dumps(result, ensure_ascii=False)
-                except Exception as e:
+                except GearLinkError as e:
+                    # 工具失败属可恢复信号：写回消息交给模型处理，不中断循环
                     result_text = f"工具调用失败: {e}"
 
                 print(f"[工具调用] {name}({arguments}) -> {result_text}")
@@ -91,5 +89,16 @@ class ReactAgent:
 
 
 if __name__ == "__main__":
+    # 入口示例：core 不直接依赖 providers，仅在演示入口处导入具体实现
+    from dotenv import load_dotenv
+
+    from gearlink.providers.openai_provider import OpenAIProvider
+
+    load_dotenv()  # 加载项目根目录 .env 中的配置（如 DEEPSEEK_API_KEY）
+
     agent = ReactAgent(provider=OpenAIProvider())
-    print(agent.run("现在几点了？"))
+    while True:
+        user_input = input("用户: ")
+        if user_input == "exit":
+            break
+        print("助手:", agent.run(user_input))
