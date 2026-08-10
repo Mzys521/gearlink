@@ -2,16 +2,15 @@
 
 from datetime import datetime
 
-from fastmcp import FastMCP
-
 from gearlink.core.tool import register_tool
 
-server = FastMCP()
 
-
-@server.tool()
 def get_current_time() -> str:
-    """获取当前本地时间，格式为 YYYY-MM-DD HH:MM:SS。"""
+    """获取当前本地时间，格式为 YYYY-MM-DD HH:MM:SS。
+
+    Returns:
+        当前本地时间的格式化字符串。
+    """
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 

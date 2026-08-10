@@ -2,7 +2,9 @@ from collections.abc import Callable
 from typing import Any
 
 from gearlink.exceptions import ToolError, ToolNotFoundError
-from gearlink.skills import SkillRegistry   # 导入内存注册表
+from gearlink.skills import SkillRegistry  # 导入内存注册表
+
+__all__ = ["TOOL_REGISTRY", "TOOL_SCHEMAS", "register_tool", "call_tool", "set_skill_registry"]
 
 # ---- OpenAI function calling 注册表 ----
 # 具体工具实现位于 gearlink/tools/，通过 register_tool 显式登记进本注册表。
@@ -68,6 +70,7 @@ def call_tool(name: str, arguments: dict[str, Any]) -> Any:
 
 # ---- 全局技能注册表（由 Agent 初始化时注入） ----
 _skill_registry: SkillRegistry | None = None
+
 
 def set_skill_registry(registry: SkillRegistry) -> None:
     """由 Agent 调用，将当前使用的技能注册表注入工具模块。"""
