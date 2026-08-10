@@ -17,6 +17,9 @@ chromadb/
 .chroma/
 *.sqlite3
 
+# ---- Demo（本仓库示例，不入库） ----
+demo/
+
 # ---- IDE / 编辑器 ----
 .idea/
 .vscode/
