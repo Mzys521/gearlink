@@ -1,10 +1,10 @@
-"""GearLink 记忆对话 Demo
+"""GearLink 记忆对话示例
 
 一个带「短期滑窗 + 长期向量检索 + 会话摘要沉淀」的记忆型对话助手，
 通过 ReAct 循环调用内置工具（get_current_time）获取实时时间。
 
-运行方式（项目根目录下）：
-    python demo/memory_chatbot.py
+运行方式（项目根目录下，须先 `pip install -e .` 安装本包）：
+    python examples/memory_chatbot.py
 
 前置条件：
     - 根目录 .env 中配置 DEEPSEEK_API_KEY（或设置同名环境变量）
@@ -16,16 +16,12 @@
 """
 
 import logging
-import sys
 from pathlib import Path
 
-# 免安装直接运行：将项目根目录加入导入路径（应用层装配，非框架源码）
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import chromadb
+from dotenv import load_dotenv
 
-import chromadb  # noqa: E402
-from dotenv import load_dotenv  # noqa: E402
-
-from gearlink import (  # noqa: E402
+from gearlink import (
     LongTermMemory,
     MemoryManager,
     OpenAIProvider,
@@ -38,7 +34,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")  # 加载根目录 .env 中的 DEEPSEEK_API_KEY
 
-# 1) 长期记忆：chromadb 向量库，持久化到 demo/.chroma/（首次运行会加载嵌入模型）
+# 1) 长期记忆：chromadb 向量库，持久化到 examples/.chroma/（首次运行会加载嵌入模型）
 vector_db = chromadb.PersistentClient(path=str(Path(__file__).resolve().parent / ".chroma"))
 long_term = LongTermMemory(
     vector_db=vector_db,
@@ -82,7 +78,7 @@ agent = ReactAgent(
 
 
 def main() -> None:
-    print("GearLink 记忆对话 Demo（输入 exit 结束 / clear 清空记忆）")
+    print("GearLink 记忆对话示例（输入 exit 结束 / clear 清空记忆）")
     print("试试问：现在是几点？/ 我叫什么名字？/ 我上次聊了什么？")
     while True:
         user_input = input("你: ").strip()

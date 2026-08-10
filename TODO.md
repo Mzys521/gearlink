@@ -20,6 +20,12 @@
 - [x] `LongTermMemory`：新增 `recency_weight` 时间衰减排序与 `max_entries` 容量上限淘汰
 - [x] `LongTermMemory`：新增 `dedupe` 写入去重（sha256 `content_hash`）与检索结果去重
 - [x] `ReactAgent`：新增 `retrieve_every_iteration` 每轮长期记忆检索注入开关
+- [x] `ReactAgent`：新增 `skill_registry` 可选参数，注入技能注册表并联动 `load_skill` 工具（默认系统提示拼入可用技能列表）
+- [x] `skills/base.py` 规范化：现代类型语法、完整类型标注、Google 风格 docstring、模块级日志器
+- [x] `tools/builtin.py` 移除冗余 FastMCP 包装；依赖清单以显式 `pyyaml` 替代 `fastmcp`
+- [x] 示例代码迁入根目录 `examples/`（`memory_chatbot.py` 自 `demo/`、`skill_demo` 自 `gearlink/examples/`），并移除 `sys.path` hack
+- [x] `.gitignore` 移除对 `tests/` 的误排除
+- [x] 补齐 `tests/test_skill.py` 与 Agent 技能注入测试用例
 
 ## 待办
 
@@ -28,7 +34,7 @@
 - [x] `LongTermMemory`：实现 `add_message` / `get_messages` / `clear`（基于 chromadb 向量检索）
 - [x] `MemoryManager`：实现短期 + 长期记忆的组合管理（`add_message` / `build_context` / `end_session` / `clear`），并支持通过 `ReactAgent(memory=...)` 注入
 - [x] `ReactAgent`：`print` 日志替换为标准库 `logging`
-- [ ] `skills/`：确定技能扩展契约（接口设计规范 §4 标注「待定」），并在文档中补齐
+- [x] `skills/`：确定技能扩展契约（渐进式披露设计），并同步 `接口设计规范.md` / `架构设计.md`
 - [x] `tools/`：将内置工具（如 `get_current_time`）从 `core/tool.py` 迁移到 `tools/`，core 仅保留注册表与调度器（含 `register_tool` 显式注册函数）
 
 ### 数据结构与序列化
@@ -37,15 +43,16 @@
 
 ### 工程化
 
-- [ ] 建立 `examples/` 目录，为每个公共 API 提供可直接运行的示例（接口设计规范 §8）
+- [x] 建立 `examples/` 目录（含记忆对话示例与技能目录示例）
+- [ ] 为其余公共 API 补齐可直接运行的示例（接口设计规范 §8）
 - [ ] CI：GitHub Actions 流水线（`ruff format --check` + `ruff check` + `pytest`）
 - [ ] `core/` 测试覆盖率 ≥ 80%（当前已有基础用例，需接入 coverage 检查）
 
 ### 开源合规（开发规范 §9）
 
 - [ ] 确定许可证类型并添加 `LICENSE`
-- [ ] 编写 `README.md`（项目简介、安装、快速开始、示例链接）
-- [ ] 编写 `CONTRIBUTING.md` 指向 `docs/开发规范.md`
-- [ ] 创建 `CHANGELOG.md`（Keep a Changelog 格式）
+- [x] 编写 `README.md`（项目简介、安装、快速开始、示例链接）
+- [x] 编写 `CONTRIBUTING.md` 指向 `docs/开发规范.md`
+- [x] 创建 `CHANGELOG.md`（Keep a Changelog 格式）
 - [x] 提供 `.env.example` 示例环境变量文件
 - [ ] 发布前用 `gitleaks` 审查历史提交，确认无泄露密钥（注意：旧提交中曾硬编码 API key，需处理历史记录或轮换密钥）

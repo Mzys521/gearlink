@@ -3,7 +3,4 @@
 from gearlink.tools.builtin import get_current_time
 from gearlink.tools.load_skill import load_skill
 
-__all__ = [
-    "get_current_time",
-    "load_skill"
-]
+__all__ = ["get_current_time", "load_skill"]
