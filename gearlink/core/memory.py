@@ -3,7 +3,7 @@ import logging
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +46,40 @@ _RECENCY_NORM_SECONDS = 30 * 24 * 60 * 60
 
 #: 会话摘要沉淀时写入长期记忆的内容前缀，用于区分摘要与原始消息
 _SESSION_SUMMARY_PREFIX = "[会话摘要] "
+
+
+def _keep_within_budget(
+    items: Sequence[Any],
+    quota: int,
+    tokens_of: Callable[[Any], int],
+    *,
+    always_keep_newest: bool = False,
+) -> list[int]:
+    """从最新一项向前贪心填充，返回不超出 token 预算的项索引（升序）。
+
+    各处上下文裁剪（检索预算、短期消息、非检索 system 消息）共用的统一策略：
+    按最新优先保留，累计 token 超出预算即停止。
+
+    Args:
+        items: 按最旧到最新排列的待裁剪项。
+        quota: token 预算上限。
+        tokens_of: 计算单项 token 数的函数。
+        always_keep_newest: 最新一项即使单独超出预算也保留（软约束，
+            避免裁剪出空结果）。
+
+    Returns:
+        保留项在 items 中的索引列表，按升序排列。
+    """
+    kept: list[int] = []
+    total = 0
+    for index in range(len(items) - 1, -1, -1):
+        tokens = tokens_of(items[index])
+        if total + tokens > quota and (kept or not always_keep_newest):
+            break
+        kept.append(index)
+        total += tokens
+    kept.reverse()
+    return kept
 
 
 class Memory(ABC):
@@ -351,7 +385,7 @@ class MemoryManager:
             for message in self.short_term.get_messages()
             if message.get("content")
         }
-        kept = [entry for entry in entries if entry.content not in short_term_contents]
+        kept: list[MemoryEntry] = []
         for entry in entries:
             if entry.content in short_term_contents:
                 logger.debug(
@@ -359,6 +393,8 @@ class MemoryManager:
                     entry.role,
                     _preview(entry.content),
                 )
+                continue
+            kept.append(entry)
         if len(kept) != len(entries):
             logger.info(
                 "检索去重: 过滤 %d 条与短期窗口重复的记忆，保留 %d 条",
@@ -391,15 +427,11 @@ class MemoryManager:
         if self.max_context_tokens is None:
             return entries
         quota = int(self.max_context_tokens * RETRIEVAL_BUDGET_RATIO)
-        kept: list[MemoryEntry] = []
-        total = 0
-        for entry in entries:
-            tokens = estimate_tokens(entry.content)
-            # 首条即使超预算也保留（软约束），其余超出即停止
-            if total + tokens > quota and kept:
-                break
-            kept.append(entry)
-            total += tokens
+        # 首条即使超预算也保留（软约束），其余超出即停止
+        kept_indices = _keep_within_budget(
+            entries, quota, lambda entry: estimate_tokens(entry.content), always_keep_newest=True
+        )
+        kept = [entries[index] for index in kept_indices]
         logger.debug(
             "检索预算裁剪: 配额 %d token（总预算 %d），保留 %d/%d 条",
             quota,
@@ -424,27 +456,20 @@ class MemoryManager:
         """
         system_msgs = [m for m in messages if m.get("role") == "system"]
         others = [m for m in messages if m.get("role") != "system"]
+        before_tokens = sum(count_message_tokens(m) for m in messages)
         remaining = budget - sum(count_message_tokens(m) for m in system_msgs)
-        kept: list[dict[str, Any]] = []
-        total = 0
-        for message in reversed(others):
-            tokens = count_message_tokens(message)
-            if total + tokens > remaining:
-                break
-            kept.append(message)
-            total += tokens
-        kept.reverse()
+        kept_indices = _keep_within_budget(others, remaining, count_message_tokens)
+        # 兜底：整体为空（无 system 且其余全超预算）时保留最新一条，避免空请求
+        if not kept_indices and not system_msgs and others:
+            kept_indices = [len(others) - 1]
 
-        messages = system_msgs + kept
-        # 兜底：整体为空时保留最新一条，避免空请求
-        if not messages and others:
-            messages = [others[-1]]
+        messages = system_msgs + [others[index] for index in kept_indices]
         logger.info(
             "上下文预算裁剪: 预算 %d token，裁剪前 %d 条（约 %d token），"
             "裁剪后 %d 条（约 %d token）",
             budget,
             len(system_msgs) + len(others),
-            sum(count_message_tokens(m) for m in (system_msgs + others)),
+            before_tokens,
             len(messages),
             sum(count_message_tokens(m) for m in messages),
         )
@@ -472,20 +497,14 @@ class MemoryManager:
         trimmable = [m for m in messages if m.get("role") == "system" and m is not protected]
         if not trimmable:
             return messages
-        if sum(count_message_tokens(m) for m in trimmable) <= quota:
-            return messages
-
         # 从最旧开始丢弃直至配额内，兜底保留最新一条（软约束）
-        kept = [trimmable[-1]]
-        total = count_message_tokens(trimmable[-1])
-        for message in reversed(trimmable[:-1]):
-            tokens = count_message_tokens(message)
-            if total + tokens > quota:
-                break
-            kept.append(message)
-            total += tokens
-        kept.reverse()
-        drop_ids = {id(m) for m in trimmable if m not in kept}
+        kept_indices = _keep_within_budget(
+            trimmable, quota, count_message_tokens, always_keep_newest=True
+        )
+        if len(kept_indices) == len(trimmable):
+            return messages
+        kept_ids = {id(trimmable[index]) for index in kept_indices}
+        drop_ids = {id(m) for m in trimmable} - kept_ids
 
         result = [m for m in messages if id(m) not in drop_ids]
         logger.info(
@@ -494,8 +513,8 @@ class MemoryManager:
             quota,
             self.system_budget_ratio,
             self.max_context_tokens,
-            len(trimmable) - len(kept),
-            len(kept),
+            len(trimmable) - len(kept_indices),
+            len(kept_indices),
         )
         return result
 

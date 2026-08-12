@@ -42,6 +42,7 @@ from gearlink import (
     ToolCallEndEvent,
     ToolCallStartEvent,
     enable_logging,
+    disable_logging
 )
 
 DEMO_DIR = Path(__file__).resolve().parent
@@ -136,7 +137,7 @@ def on_step(event):
 def main() -> None:
     # 一键开启框架内部日志（旧代码的 logging.basicConfig 由 enable_logging 取代；
     # 对应关闭为 disable_logging）
-    enable_logging()
+    disable_logging()
 
     skill_registry = build_skill_registry()
     memory = build_memory()

@@ -36,4 +36,5 @@
 - `tools/builtin.py` 移除冗余的 FastMCP 包装；依赖清单以显式 `pyyaml` 替代 `fastmcp`；
 - `skills/base.py` 规范化：现代类型语法、完整类型标注、Google 风格 docstring、标准日志器；
 - 公共 API 出口补齐：技能三件套、异常体系、`set_skill_registry` 与 token 工具函数均从顶层包 `gearlink` 显式导出（见 `__all__`）；
-- 移除 `core/agent.py` 的 `__main__` 演示入口，可运行示例统一收敛至根目录 `examples/`。
+- 移除 `core/agent.py` 的 `__main__` 演示入口，可运行示例统一收敛至根目录 `examples/`；
+- 去重重构：`core/memory.py` 三处 token 预算裁剪逻辑统一为 `_keep_within_budget` 辅助函数，检索去重合并为单次遍历；`core/agent.py` 事件产出样板代码统一为基类 `_emit_event`，`provider` / `_hooks` 初始化上提至 `Agent` 基类（`PlanExecuteAgent` 与执行器共享同一回调列表）；`exceptions.py` 移除冗余 `pass`。公共 API 行为不变。

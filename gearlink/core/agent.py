@@ -103,6 +103,17 @@ class Agent(ABC):
 
     _hooks: list[HookFn]
 
+    def __init__(self, provider: ModelProvider, hooks: list[HookFn] | None = None) -> None:
+        """初始化 Agent 公共状态。
+
+        Args:
+            provider: 模型提供者实例。
+            hooks: 事件回调列表（on_step 语义）；每个事件产出时按序调用，
+                可返回替换事件（None 表示不修改）。默认空列表，等价于无回调。
+        """
+        self.provider = provider
+        self._hooks: list[HookFn] = list(hooks or [])
+
     def add_hook(self, hook: HookFn) -> None:
         """注册一个事件回调（on_step 语义）。
 
@@ -135,6 +146,23 @@ class Agent(ABC):
         event.seq = seq
         event.timestamp = time.time()
         return event
+
+    def _emit_event(self, event: AgentEvent, seq: int) -> Generator[AgentEvent, None, int]:
+        """经回调处理后产出单个事件，并返回下一可用序号（供 yield from 使用）。
+
+        Args:
+            event: 待产出的事件。
+            seq: 该事件应分配的全局序号。
+
+        Yields:
+            经 _emit 处理（可能被回调替换）后的事件。
+
+        Returns:
+            下一可用序号（产出事件的 seq + 1，替换事件同样适用）。
+        """
+        event = self._emit(event, seq)
+        yield event
+        return event.seq + 1
 
     def run(self, user_input: str) -> str:
         """执行一次用户请求，运行本 Agent 的编排循环直到得到最终答案。
@@ -224,9 +252,8 @@ class ReactAgent(Agent):
             hooks: 事件回调列表（on_step 语义）；每个事件产出时按序调用，
                 可返回替换事件（None 表示不修改）。默认空列表，等价于无回调。
         """
-        self.provider = provider
+        super().__init__(provider=provider, hooks=hooks)
         self.retrieve_every_iteration = retrieve_every_iteration
-        self._hooks: list[HookFn] = list(hooks or [])
         if skill_registry is not None:
             # 供 load_skill 工具按名解析技能（core/tool.py 全局注入点）
             set_skill_registry(skill_registry)
@@ -275,9 +302,7 @@ class ReactAgent(Agent):
 
         seq = 0
         for iteration in range(MAX_ITERATIONS):
-            event = self._emit(StepStartEvent(iteration=iteration), seq)
-            yield event
-            seq = event.seq + 1
+            seq = yield from self._emit_event(StepStartEvent(iteration=iteration), seq)
 
             # 推理：默认仅首轮携带查询注入长期记忆；开启 retrieve_every_iteration 时每轮都注入
             query = user_input if (iteration == 0 or self.retrieve_every_iteration) else None
@@ -288,11 +313,9 @@ class ReactAgent(Agent):
                 response: ModelResponse | None = None
                 for chunk in self.provider.chat_stream(messages=messages, tools=TOOL_SCHEMAS):
                     if chunk.delta:
-                        event = self._emit(
+                        seq = yield from self._emit_event(
                             TextDeltaEvent(delta=chunk.delta, iteration=iteration), seq
                         )
-                        yield event
-                        seq = event.seq + 1
                     if chunk.response is not None:
                         response = chunk.response
                 if response is None:
@@ -300,7 +323,7 @@ class ReactAgent(Agent):
             else:
                 response = self.provider.chat(messages=messages, tools=TOOL_SCHEMAS)
 
-            event = self._emit(
+            seq = yield from self._emit_event(
                 ModelMessageEvent(
                     iteration=iteration,
                     content=response.content,
@@ -308,24 +331,20 @@ class ReactAgent(Agent):
                 ),
                 seq,
             )
-            yield event
-            seq = event.seq + 1
 
             # 如果模型没有调用工具，说明已经生成了最终答案，直接返回
             if not response.tool_calls:
                 self.memory.add_message({"role": "assistant", "content": response.content})
-                event = self._emit(
+                yield from self._emit_event(
                     FinalAnswerEvent(iteration=iteration, content=response.content), seq
                 )
-                yield event
                 return
 
             # 行动 + 观察：记录工具调用并执行，将结果写回记忆后继续循环
             seq = yield from self._execute_tool_calls(response, iteration=iteration, seq=seq)
 
         # 达到最大迭代次数仍未得到答案
-        event = self._emit(LoopAbortEvent(reason=_MAX_ITERATIONS_FALLBACK), seq)
-        yield event
+        yield from self._emit_event(LoopAbortEvent(reason=_MAX_ITERATIONS_FALLBACK), seq)
 
     def _execute_tool_calls(
         self, response: ModelResponse, *, iteration: int, seq: int
@@ -371,7 +390,7 @@ class ReactAgent(Agent):
             except json.JSONDecodeError:
                 arguments = {}
 
-            event = self._emit(
+            seq = yield from self._emit_event(
                 ToolCallStartEvent(
                     iteration=iteration,
                     tool_call_id=tool_call.id,
@@ -380,8 +399,6 @@ class ReactAgent(Agent):
                 ),
                 seq,
             )
-            yield event
-            seq = event.seq + 1
 
             # 执行工具（call_tool 会从 TOOL_REGISTRY 中查找并调用）
             try:
@@ -403,7 +420,7 @@ class ReactAgent(Agent):
 
             logger.info("[工具调用] %s(%s) -> %s", name, arguments, result_text)
 
-            event = self._emit(
+            seq = yield from self._emit_event(
                 ToolCallEndEvent(
                     iteration=iteration,
                     tool_call_id=tool_call.id,
@@ -414,8 +431,6 @@ class ReactAgent(Agent):
                 ),
                 seq,
             )
-            yield event
-            seq = event.seq + 1
 
             # 将工具执行结果作为 tool 角色消息存入记忆
             self.memory.add_message(
@@ -507,28 +522,19 @@ class PlanExecuteAgent(Agent):
             skill_registry: 技能注册表；非 None 时登记给 load_skill 工具使用，
                 并透传给内部执行器。
             max_steps: 规划步骤数量上限，规划结果超出时截断。默认 5。
-            hooks: 事件回调列表（on_step 语义）；同时注册到本 Agent 与内部执行器。
+            hooks: 事件回调列表（on_step 语义）；同时作用于本 Agent 与内部执行器。
         """
-        self.provider = provider
+        super().__init__(provider=provider, hooks=hooks)
         self.max_steps = max_steps
-        self._hooks: list[HookFn] = list(hooks or [])
-        # 执行器复用 ReAct 子循环（共享同一记忆与回调）
+        # 执行器复用 ReAct 子循环
         self.executor = ReactAgent(
             provider=provider,
             memory=memory,
             retrieve_every_iteration=retrieve_every_iteration,
             skill_registry=skill_registry,
-            hooks=self._hooks,
         )
-
-    def add_hook(self, hook: HookFn) -> None:
-        """注册事件回调，并同步注册到内部执行器（二者事件流共用同一回调集）。
-
-        Args:
-            hook: 事件回调函数。
-        """
-        self._hooks.append(hook)
-        self.executor.add_hook(hook)
+        # 与执行器共享同一回调列表：基类 add_hook 对二者事件流同时生效
+        self.executor._hooks = self._hooks
 
     def run_events(self, user_input: str, *, stream: bool = False) -> Iterator[AgentEvent]:
         """执行一次用户请求，逐步产出规划-执行流程的事件（编排循环的唯一实现）。
@@ -549,16 +555,12 @@ class PlanExecuteAgent(Agent):
         plan = self._plan(user_input)
 
         seq = 0
-        event = self._emit(PlanGeneratedEvent(steps=plan), seq)
-        yield event
-        seq = event.seq + 1
+        seq = yield from self._emit_event(PlanGeneratedEvent(steps=plan), seq)
 
         # 2) 执行：逐步运行内部 ReAct 执行器，转发执行器事件并统一编号
         step_results: list[str] = []
         for index, step in enumerate(plan):
-            event = self._emit(PlanStepStartEvent(index=index, step=step), seq)
-            yield event
-            seq = event.seq + 1
+            seq = yield from self._emit_event(PlanStepStartEvent(index=index, step=step), seq)
 
             step_answer: str | None = None
             for sub_event in self.executor.run_events(step, stream=stream):
@@ -572,11 +574,9 @@ class PlanExecuteAgent(Agent):
                 step_answer if step_answer is not None else _MAX_ITERATIONS_FALLBACK
             )
 
-            event = self._emit(
+            seq = yield from self._emit_event(
                 PlanStepEndEvent(index=index, step=step, result=step_results[-1]), seq
             )
-            yield event
-            seq = event.seq + 1
 
         # 3) 整合：多步骤时汇总为最终答案，单步骤直接透传。
         # 单步骤时执行器已以 TextDeltaEvent 流出文本，不再重复产出增量。
@@ -585,11 +585,8 @@ class PlanExecuteAgent(Agent):
         else:
             answer = step_results[0]
         if stream and len(plan) > 1:
-            event = self._emit(TextDeltaEvent(delta=answer), seq)
-            yield event
-            seq = event.seq + 1
-        event = self._emit(FinalAnswerEvent(content=answer), seq)
-        yield event
+            seq = yield from self._emit_event(TextDeltaEvent(delta=answer), seq)
+        yield from self._emit_event(FinalAnswerEvent(content=answer), seq)
 
     def _plan(self, user_input: str) -> list[str]:
         """规划：调用规划器把任务分解为步骤列表。
