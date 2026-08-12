@@ -5,7 +5,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from gearlink.exceptions import MemoryError
 from gearlink.utils.token_count import count_message_tokens, estimate_tokens
@@ -38,6 +38,26 @@ def _preview(text: str, length: int = _LOG_PREVIEW_LENGTH) -> str:
 #: 长期记忆检索结果在上下文总预算中的最大占比，超出部分按相关度裁剪
 RETRIEVAL_BUDGET_RATIO = 0.25
 
+#: 可注入的 embedding 函数契约：输入文本列表，返回对应的向量列表。
+#: 具体实现（OpenAI embeddings / 本地 BGE 等）由应用层注入（依赖倒置，
+#: 开发方向 §4.1），`core/` 不依赖任何具体向量化实现。
+EmbeddingFn = Callable[[list[str]], list[list[float]]]
+
+#: 用户画像更新钩子契约（开发方向 §5.2）：输入（本次会话新消息，当前画像），
+#: 返回新画像字典；返回 None 表示不更新。具体提取逻辑由应用层注入。
+ProfileHookFn = Callable[["list[dict[str, Any]]", "dict[str, Any] | None"], "dict[str, Any] | None"]
+
+
+class _InjectedEmbeddingFunction:
+    """把 :data:`EmbeddingFn` 适配为 chromadb 嵌入函数协议（内部实现）。"""
+
+    def __init__(self, fn: EmbeddingFn) -> None:
+        self._fn = fn
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return self._fn(list(input))
+
+
 #: 检索注入时各角色对应的说话人显示名（未知角色回退为原始 role 值）
 _ROLE_LABELS = {"user": "用户", "assistant": "助手"}
 
@@ -46,6 +66,120 @@ _RECENCY_NORM_SECONDS = 30 * 24 * 60 * 60
 
 #: 会话摘要沉淀时写入长期记忆的内容前缀，用于区分摘要与原始消息
 _SESSION_SUMMARY_PREFIX = "[会话摘要] "
+
+#: 上下文压缩生成的摘要消息前缀；已压缩的摘要不再参与二次压缩
+_CONTEXT_SUMMARY_PREFIX = "[上下文摘要] "
+
+#: 用户画像注入时的 system 消息前缀，提示模型这是跨会话沉淀的用户背景
+_PROFILE_PREFIX = "[用户画像] "
+
+#: 上下文压缩阈值占 max_context_tokens 的比例：短期记忆超出即触发压缩
+COMPRESSION_THRESHOLD_RATIO = 0.7
+
+#: 压缩时始终保留的最新消息条数（避免把当下对话全部压掉）
+_MIN_KEEP_MESSAGES = 2
+
+#: MMR 检索时相对请求条数多取的候选倍数（为阈值过滤与去冗余留出余量）
+_MMR_CANDIDATE_MULTIPLIER = 3
+
+#: MMR 检索候选条数的下限，避免小 limit 时候选池过窄
+_MMR_MIN_CANDIDATES = 10
+
+
+@runtime_checkable
+class VectorStore(Protocol):
+    """向量存储协议：长期记忆的存储后端抽象（开发方向 §5.2）。
+
+    默认实现为 :class:`ChromaVectorStore`（包装 chromadb Collection）；
+    实现本协议即可替换为自定义后端（内存/文件/远程向量库等），
+    :class:`LongTermMemory` 不感知具体存储实现。
+    """
+
+    def add(self, ids: list[str], documents: list[str], metadatas: list[dict[str, Any]]) -> None:
+        """写入若干条记录（id、文本、元数据一一对应）。"""
+        ...
+
+    def get(
+        self, include: list[str] | None = None, where: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """读取记录，返回含 ids / documents / metadatas 键的字典。
+
+        include 为 None 或不含对应键时，相应字段可省略；where 为元数据等值过滤条件。
+        """
+        ...
+
+    def query(self, query_text: str, n_results: int) -> dict[str, list[Any]]:
+        """按语义相似度检索，返回扁平结构：
+
+        ``{"ids": [...], "documents": [...], "metadatas": [...], "distances": [...]}``，
+        各列表等长且按相关度从高到低排列。
+        """
+        ...
+
+    def delete(self, ids: list[str]) -> None:
+        """按 id 批量删除记录。"""
+        ...
+
+
+class ChromaVectorStore:
+    """chromadb Collection 的 :class:`VectorStore` 协议适配器（默认存储后端）。
+
+    把 chromadb 嵌套列表的查询结果扁平化为协议约定的单列表结构，
+    行为与原 chromadb Collection 用法完全一致。
+    """
+
+    def __init__(self, collection: Any) -> None:
+        """初始化适配器。
+
+        Args:
+            collection: chromadb Collection 实例（或其等价 Fake）。
+        """
+        self._collection = collection
+
+    def add(self, ids: list[str], documents: list[str], metadatas: list[dict[str, Any]]) -> None:
+        """写入记录，直接转发给 chromadb Collection。"""
+        self._collection.add(ids=ids, documents=documents, metadatas=metadatas)
+
+    def get(
+        self, include: list[str] | None = None, where: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """读取记录，透传 chromadb get 结果。"""
+        if where is None:
+            return self._collection.get(include=include)
+        return self._collection.get(include=include, where=where)
+
+    def query(self, query_text: str, n_results: int) -> dict[str, list[Any]]:
+        """检索并把 chromadb 的嵌套列表结果扁平化为单列表。"""
+        result = self._collection.query(query_texts=[query_text], n_results=n_results)
+        return {
+            "ids": result["ids"][0],
+            "documents": result["documents"][0],
+            "metadatas": result["metadatas"][0],
+            "distances": result["distances"][0],
+        }
+
+    def delete(self, ids: list[str]) -> None:
+        """按 id 批量删除，直接转发给 chromadb Collection。"""
+        self._collection.delete(ids=ids)
+
+
+def _char_bigrams(text: str) -> set[str]:
+    """提取文本的字符二元组集合（MMR 相似度计算的内部辅助）。"""
+    return {text[i : i + 2] for i in range(len(text) - 1)}
+
+
+def _similarity(left: str, right: str) -> float:
+    """两段文本的字符二元组 Jaccard 相似度（内部辅助），取值 [0, 1]。
+
+    无嵌入向量可用的情况下，用字面重叠近似语义相似度，支撑 MMR 去冗余；
+    任一侧为空或长度不足 2 时返回 0.0（无法构成二元组）。
+    """
+    left_grams = _char_bigrams(left)
+    right_grams = _char_bigrams(right)
+    if not left_grams or not right_grams:
+        return 0.0
+    overlap = len(left_grams & right_grams)
+    return overlap / (len(left_grams) + len(right_grams) - overlap)
 
 
 def _keep_within_budget(
@@ -206,6 +340,8 @@ class MemoryManager:
         max_context_tokens: int | None = None,
         summarizer: Callable[[str], str] | None = None,
         system_budget_ratio: float = 1.0,
+        compress_context: bool = False,
+        profile_hook: ProfileHookFn | None = None,
     ) -> None:
         """初始化记忆管理器。
 
@@ -223,6 +359,14 @@ class MemoryManager:
             system_budget_ratio: 非检索 system 消息占上下文预算的比例上限，
                 取值 (0, 1.0]；1.0 表示不裁剪（现状）。检索注入的 system 消息
                 已由 RETRIEVAL_BUDGET_RATIO 独立保护，不参与本配额裁剪。
+            compress_context: 上下文摘要压缩开关（开发方向 §5.2）；True 且配置了
+                ``summarizer`` 与 ``max_context_tokens`` 时，短期记忆超出预算阈值
+                （COMPRESSION_THRESHOLD_RATIO）会把最旧一段对话动态压缩为摘要，
+                提升长对话信息保持率。False 表示仅静态裁剪（现状）。
+            profile_hook: 用户画像更新钩子（开发方向 §5.2）；
+                `Callable[[新消息列表, 当前画像], 新画像或 None]`，在 :meth:`end_session`
+                时由管理器调用，返回非 None 时更新内部画像，后续 build_context
+                优先注入。None 表示不启用画像（现状）。具体提取逻辑由应用层注入。
         """
         self.short_term = short_term
         self.long_term = long_term
@@ -230,6 +374,9 @@ class MemoryManager:
         self.max_context_tokens = max_context_tokens
         self.summarizer = summarizer
         self.system_budget_ratio = system_budget_ratio
+        self.compress_context = compress_context
+        self.profile_hook = profile_hook
+        self.profile: dict[str, Any] | None = None
 
     def add_message(self, message: dict[str, Any]) -> None:
         """写入一条消息：必进短期记忆，按策略选择性沉淀到长期记忆。
@@ -298,6 +445,18 @@ class MemoryManager:
                     sedimented += 1
             if sedimented:
                 logger.info("会话结束: 补沉淀 %d 条短期记忆到长期记忆", sedimented)
+
+        if self.profile_hook is not None:
+            # 用户画像钩子（开发方向 §5.2）：失败不中断会话结束
+            try:
+                updated = self.profile_hook(self.short_term.get_messages(), self.profile)
+            except Exception:
+                logger.warning("用户画像钩子执行失败，保持原画像", exc_info=True)
+            else:
+                if updated is not None:
+                    self.profile = updated
+                    logger.info("用户画像已更新: %s", _preview(str(updated), 120))
+
         self.short_term.clear()
 
     def _build_transcript(self) -> str:
@@ -338,8 +497,20 @@ class MemoryManager:
         Raises:
             MemoryError: 长期记忆检索失败时抛出。
         """
+        self._compress_context_if_needed()
+
         messages: list[dict[str, Any]] = []
         protected_system: dict[str, Any] | None = None
+
+        if self.profile is not None:
+            # 用户画像优先携带（开发方向 §5.2）：置于检索注入之前的首位 system
+            profile_lines = "\n".join(f"- {key}: {value}" for key, value in self.profile.items())
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"{_PROFILE_PREFIX}以下是已知的用户背景：\n{profile_lines}",
+                }
+            )
 
         if self.long_term is not None and query:
             limit = self.relevant_limit if relevant_limit is None else relevant_limit
@@ -367,6 +538,53 @@ class MemoryManager:
             if self.system_budget_ratio < 1.0:
                 messages = self._trim_system_to_ratio(messages, protected_system)
         return messages
+
+    def _compress_context_if_needed(self) -> None:
+        """上下文摘要压缩：短期记忆超出预算阈值时把最旧一段压缩为摘要。
+
+        仅当 ``compress_context`` / ``summarizer`` / ``max_context_tokens`` 三者齐备
+        时生效（开发方向 §5.2）：把除最新 _MIN_KEEP_MESSAGES 条外的最旧一段
+        拼成 transcript 交由 summarizer 压缩，以单条 ``[上下文摘要]`` system
+        消息写回短期记忆头部（既有摘要会一并纳入新 transcript 递进压缩）。
+        压缩失败不中断主流程（保留现状，由后续静态裁剪兜底）。
+        """
+        if not (self.compress_context and self.summarizer and self.max_context_tokens):
+            return
+        messages = self.short_term.get_messages()
+        threshold = int(self.max_context_tokens * COMPRESSION_THRESHOLD_RATIO)
+        total = sum(count_message_tokens(m) for m in messages)
+        if total <= threshold or len(messages) <= _MIN_KEEP_MESSAGES:
+            return
+
+        segment = messages[:-_MIN_KEEP_MESSAGES]
+        lines = []
+        for message in segment:
+            content = message.get("content")
+            if not content:
+                continue
+            role = message.get("role")
+            label = _ROLE_LABELS.get(role, role)
+            lines.append(f"{label}: {content}")
+        if len(lines) < 2:
+            return
+        try:
+            summary = self.summarizer("\n".join(lines))
+        except Exception:
+            logger.warning("上下文压缩摘要生成失败，保留原消息", exc_info=True)
+            return
+
+        summary_message = {"role": "system", "content": f"{_CONTEXT_SUMMARY_PREFIX}{summary}"}
+        kept = [summary_message] + messages[-_MIN_KEEP_MESSAGES:]
+        self.short_term.clear()
+        for message in kept:
+            self.short_term.add_message(message)
+        logger.info(
+            "上下文压缩: %d 条消息（约 %d token）压缩为摘要（约 %d token），保留最新 %d 条",
+            len(segment),
+            sum(count_message_tokens(m) for m in segment),
+            estimate_tokens(summary),
+            _MIN_KEEP_MESSAGES,
+        )
 
     def _dedupe_against_short_term(self, entries: "list[MemoryEntry]") -> "list[MemoryEntry]":
         """过滤掉与短期窗口内容重复的检索条目，避免同一内容注入两次。
@@ -528,6 +746,57 @@ class MemoryManager:
         if self.long_term is not None:
             self.long_term.clear()
 
+    def snapshot(
+        self, model: str | None = None, metadata: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """导出当前会话快照，可序列化落盘用于断线恢复（开发方向 §4.5）。
+
+        快照包含短期记忆中的全部对话消息与会话元数据；长期记忆不参与快照
+        （其本身已是持久化存储）。
+
+        Args:
+            model: 记录本会话使用的模型名称；None 表示不记录。
+            metadata: 应用层自定义的附加元数据；None 表示不附加。
+
+        Returns:
+            可直接 ``json.dumps`` 的快照字典，与 :meth:`restore` 保证往返一致。
+        """
+        session = Session(
+            id=str(uuid.uuid4()),
+            created_at=time.time(),
+            model=model,
+            messages=list(self.short_term.get_messages()),
+            metadata=dict(metadata or {}),
+        )
+        logger.info("会话快照已生成: id=%s，含 %d 条消息", session.id, len(session.messages))
+        return session.to_dict()
+
+    def restore(self, snapshot: dict[str, Any]) -> "Session":
+        """从快照恢复会话：清空短期记忆后按序写回快照中的消息。
+
+        恢复仅依赖 ``Memory`` 抽象接口（clear / add_message），不触碰具体存储
+        实现；写入走短期记忆的正常路径，其截断策略照常生效。长期记忆
+        不受影响。
+
+        Args:
+            snapshot: :meth:`snapshot` 产出的字典。
+
+        Returns:
+            恢复出的 :class:`Session` 实例，便于应用层读取会话元数据。
+
+        Raises:
+            MemoryError: 快照格式非法（缺少必要字段）时抛出。
+        """
+        try:
+            session = Session.from_dict(snapshot)
+        except (KeyError, TypeError) as e:
+            raise MemoryError(f"会话快照格式非法，无法恢复: {e}") from e
+        self.short_term.clear()
+        for message in session.messages:
+            self.short_term.add_message(message)
+        logger.info("会话快照已恢复: id=%s，写回 %d 条消息", session.id, len(session.messages))
+        return session
+
 
 @dataclass(frozen=True)
 class MemoryEntry:
@@ -568,32 +837,82 @@ class MemoryEntry:
         )
 
 
+@dataclass(frozen=True)
+class Session:
+    """会话快照：记忆快照 + 元数据，用于断线恢复（开发方向 §4.5）。"""
+
+    id: str
+    created_at: float
+    model: str | None = None
+    messages: tuple[dict[str, Any], ...] = ()
+    metadata: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典，与 from_dict 保证往返一致。"""
+        return {
+            "id": self.id,
+            "created_at": self.created_at,
+            "model": self.model,
+            "messages": list(self.messages),
+            "metadata": dict(self.metadata or {}),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Session":
+        """从字典反序列化。
+
+        Args:
+            data: to_dict 产出的字典（兼容缺少 model / messages / metadata
+                字段的旧数据）。
+
+        Returns:
+            Session 实例。
+        """
+        return cls(
+            id=data["id"],
+            created_at=data["created_at"],
+            model=data.get("model"),
+            messages=tuple(data.get("messages", [])),
+            metadata=data.get("metadata"),
+        )
+
+
 class LongTermMemory(Memory):
     """长期记忆：基于向量检索的语义信息。
 
-    写入的消息以 content 作为向量化文本（由 chromadb 默认嵌入函数处理），
+    写入的消息以 content 作为向量化文本（默认由 chromadb 默认嵌入函数处理），
     metadata 中存 role、写入时间戳与 content 的 sha256 哈希，支持按语义相似度检索。
+    存储后端收敛为 :class:`VectorStore` 协议（开发方向 §5.2）：默认仍由
+    ``vector_db`` 包装的 :class:`ChromaVectorStore` 承担，也可通过 ``store``
+    参数直接注入自定义后端。
 
     可选能力（均默认关闭，等价于纯向量检索现状）：
 
+    - ``embedding_function``：注入自定义向量化函数，替代 chromadb 默认嵌入模型；
     - ``recency_weight``：检索排序引入时间衰减，让新近记忆适度排前；
     - ``max_entries``：容量上限，超出时按写入时间淘汰最旧条目；
-    - ``dedupe``：写入前按内容哈希去重，避免同内容反复堆积。
+    - ``dedupe``：写入前按内容哈希去重，避免同内容反复堆积；
+    - ``relevance_threshold``：检索结果按 distance 阈值过滤低相关条目；
+    - ``mmr_lambda``：检索结果经 MMR 去冗余重排，避免 top-k 全是重复语义。
     """
 
     def __init__(
         self,
-        vector_db: "chromadb.Client",
-        collection_name: str,
+        vector_db: "chromadb.Client | None" = None,
+        collection_name: str = "memory",
         recency_weight: float = 0.0,
         max_entries: int | None = None,
         dedupe: bool = False,
+        embedding_function: EmbeddingFn | None = None,
+        relevance_threshold: float | None = None,
+        mmr_lambda: float | None = None,
+        store: VectorStore | None = None,
     ) -> None:
         """初始化长期记忆。
 
         Args:
-            vector_db: chromadb.Client 实例。
-            collection_name: 向量库集合名称，不存在时自动创建。
+            vector_db: chromadb.Client 实例；与 ``store`` 二选一。
+            collection_name: 向量库集合名称，不存在时自动创建（仅 ``vector_db`` 路径）。
             recency_weight: 检索排序中新旧衰减权重；0.0 表示纯相关度排序。
                 大于 0 时按 ``score = distance + recency_weight * age_ratio`` 重排，
                 age_ratio 为条目年龄相对 30 天归一化的 [0,1] 值。
@@ -601,19 +920,51 @@ class LongTermMemory(Memory):
                 None 表示不设限。
             dedupe: 写入前去重开关；True 时先按 content 的 sha256 哈希查询，
                 命中则跳过本次写入。False 表示原样写入。
+            embedding_function: 自定义向量化函数（批量文本 → 批量向量）；
+                None 时使用 chromadb 默认嵌入模型（行为与现状一致）。
+                写入与检索统一走注入的函数。注意：chromadb 同名集合已存在时
+                沿用既有嵌入配置，切换 embedding 应使用新的 collection_name。
+                仅 ``vector_db`` 路径生效；自定义 ``store`` 的向量化由后端自行承担。
+            relevance_threshold: 检索相关性阈值（开发方向 §5.2）；非 None 时
+                过滤 distance 大于该值的条目，避免低相关记忆注入上下文。
+                None 表示不过滤（现状）。阈值取值依赖后端距离度量
+                （chromadb 默认 L2，越小越相关）。
+            mmr_lambda: MMR 去冗余强度（开发方向 §5.2），取值 [0, 1]；
+                非 None 时检索结果按最大边际相关重排，平衡相关度与多样性，
+                1.0 等价纯相关度排序、0.0 最大化多样性。None 表示不启用（现状）。
+            store: 直接注入 :class:`VectorStore` 存储后端；提供时优先于
+                ``vector_db``（此时 collection_name / embedding_function 不生效）。
 
         Raises:
+            ValueError: vector_db 与 store 均未提供时抛出。
             MemoryError: 集合创建/获取失败时抛出。
         """
+        if store is None and vector_db is None:
+            raise ValueError("须提供 vector_db（chromadb.Client）或 store（VectorStore 后端）")
         self.vector_db = vector_db
         self.collection_name = collection_name
         self.recency_weight = recency_weight
         self.max_entries = max_entries
         self.dedupe = dedupe
+        self.embedding_function = embedding_function
+        self.relevance_threshold = relevance_threshold
+        self.mmr_lambda = mmr_lambda
+
+        if store is not None:
+            self.store: VectorStore = store
+            self.collection: Any = None
+            return
+
+        collection_kwargs: dict[str, Any] = {}
+        if embedding_function is not None:
+            collection_kwargs["embedding_function"] = _InjectedEmbeddingFunction(embedding_function)
         try:
-            self.collection = vector_db.get_or_create_collection(name=collection_name)
+            self.collection = vector_db.get_or_create_collection(
+                name=collection_name, **collection_kwargs
+            )
         except Exception as e:
             raise MemoryError(f"创建向量集合 {collection_name} 失败: {e}") from e
+        self.store = ChromaVectorStore(self.collection)
 
     def add_message(self, message: dict[str, Any]) -> None:
         """添加一条消息到长期记忆。
@@ -638,7 +989,7 @@ class LongTermMemory(Memory):
 
         if self.dedupe:
             try:
-                hits = self.collection.get(where={"content_hash": content_hash})["ids"]
+                hits = self.store.get(where={"content_hash": content_hash})["ids"]
             except Exception as e:
                 raise MemoryError(f"长期记忆去重查询失败: {e}") from e
             if hits:
@@ -646,7 +997,7 @@ class LongTermMemory(Memory):
                 return
 
         try:
-            self.collection.add(
+            self.store.add(
                 ids=[str(uuid.uuid4())],
                 documents=[content],
                 metadatas=[
@@ -676,7 +1027,7 @@ class LongTermMemory(Memory):
             MemoryError: 向量库读取失败时抛出。
         """
         try:
-            result = self.collection.get(include=["metadatas", "documents"])
+            result = self.store.get(include=["metadatas", "documents"])
         except Exception as e:
             raise MemoryError(f"长期记忆读取失败: {e}") from e
         messages = sorted(
@@ -694,7 +1045,9 @@ class LongTermMemory(Memory):
         """按语义相似度检索与查询最相关的记忆。
 
         返回前会按 content 精确去重（保留相关度首个），避免重复内容注入上下文。
-        配置了 ``recency_weight`` 时，去重后结果会按
+        配置了 ``relevance_threshold`` 时，distance 超阈值的低相关条目被过滤；
+        配置了 ``mmr_lambda`` 时，结果经 MMR 去冗余重排（多取候选后选取），
+        避免 top-k 全是重复语义；配置了 ``recency_weight`` 时，最终结果再按
         ``score = distance + recency_weight * age_ratio`` 重排，新近记忆适度排前。
 
         Args:
@@ -709,11 +1062,11 @@ class LongTermMemory(Memory):
             MemoryError: 向量库检索失败时抛出。
         """
         try:
-            result = self.collection.query(query_texts=[query], n_results=limit)
+            result = self.store.query(query_text=query, n_results=self._candidate_count(limit))
         except Exception as e:
             raise MemoryError(f"长期记忆检索失败: {e}") from e
-        ids, documents = result["ids"][0], result["documents"][0]
-        metadatas, distances = result["metadatas"][0], result["distances"][0]
+        ids, documents = result["ids"], result["documents"]
+        metadatas, distances = result["metadatas"], result["distances"]
         entries = [
             MemoryEntry(
                 id=entry_id,
@@ -725,9 +1078,91 @@ class LongTermMemory(Memory):
             for entry_id, doc, meta, distance in zip(ids, documents, metadatas, distances)
         ]
         entries = self._dedupe_by_content(entries)
+        if self.relevance_threshold is not None:
+            entries = self._filter_by_relevance(entries)
+        if self.mmr_lambda is not None:
+            entries = self._mmr_rerank(entries, limit)
+        else:
+            entries = entries[:limit]
         if self.recency_weight > 0:
             entries = self._sort_by_recency(entries)
         return entries
+
+    def _candidate_count(self, limit: int) -> int:
+        """计算向量库检索的候选条数。
+
+        未启用阈值过滤与 MMR 时直接按请求条数检索（行为与现状一致）；
+        启用后多取候选，为过滤与去冗余留出余量。
+        """
+        if self.mmr_lambda is None and self.relevance_threshold is None:
+            return limit
+        return max(limit * _MMR_CANDIDATE_MULTIPLIER, _MMR_MIN_CANDIDATES)
+
+    def _filter_by_relevance(self, entries: "list[MemoryEntry]") -> "list[MemoryEntry]":
+        """按相关性阈值过滤检索结果（开发方向 §5.2）。
+
+        仅保留 distance 不超过 ``relevance_threshold`` 的条目（distance 越小
+        越相关）；distance 缺失的条目按 0.0 处理（视为最相关）。
+
+        Args:
+            entries: 检索结果列表。
+
+        Returns:
+            过滤后的条目列表。
+        """
+        kept = [
+            entry
+            for entry in entries
+            if (entry.distance if entry.distance is not None else 0.0) <= self.relevance_threshold
+        ]
+        if len(kept) != len(entries):
+            logger.info(
+                "检索阈值过滤: 过滤 %d 条低相关记忆（阈值 %s），保留 %d 条",
+                len(entries) - len(kept),
+                self.relevance_threshold,
+                len(kept),
+            )
+        return kept
+
+    def _mmr_rerank(self, entries: "list[MemoryEntry]", limit: int) -> "list[MemoryEntry]":
+        """按最大边际相关（MMR）对检索结果去冗余重排（开发方向 §5.2）。
+
+        贪心逐个选取：``score = λ * 归一化相关度 + (1-λ) * (1-与已选集最大相似度)``，
+        相关度在候选池内 min-max 归一化到 [0,1]（distance 越小相关度越高），
+        相似度用字符二元组 Jaccard 近似。λ=1.0 退化为纯相关度排序。
+
+        Args:
+            entries: 按相关度从高到低排列的候选条目。
+            limit: 选取的最大条数。
+
+        Returns:
+            MMR 选取后的条目列表（长度不超过 limit）。
+        """
+        if not entries:
+            return []
+        lam = min(max(self.mmr_lambda, 0.0), 1.0)
+        distances = [entry.distance if entry.distance is not None else 0.0 for entry in entries]
+        d_min, d_max = min(distances), max(distances)
+        span = d_max - d_min
+        relevance = [1.0 if span == 0 else 1.0 - (d - d_min) / span for d in distances]
+
+        selected: list[MemoryEntry] = []
+        pool = list(range(len(entries)))
+        while pool and len(selected) < limit:
+            best_index, best_score = pool[0], -1.0
+            for index in pool:
+                max_similarity = max(
+                    (_similarity(entries[index].content, kept.content) for kept in selected),
+                    default=0.0,
+                )
+                score = lam * relevance[index] + (1.0 - lam) * (1.0 - max_similarity)
+                if score > best_score:
+                    best_index, best_score = index, score
+            selected.append(entries[best_index])
+            pool.remove(best_index)
+        if len(selected) != len(entries):
+            logger.info("MMR 去冗余: 从 %d 条候选中选取 %d 条", len(entries), len(selected))
+        return selected
 
     def _dedupe_by_content(self, entries: "list[MemoryEntry]") -> "list[MemoryEntry]":
         """按 content 精确去重检索结果，保留相关度首个。
@@ -788,7 +1223,7 @@ class LongTermMemory(Memory):
             MemoryError: 向量库读取/删除失败时抛出。
         """
         try:
-            result = self.collection.get(include=["metadatas"])
+            result = self.store.get(include=["metadatas"])
         except Exception as e:
             raise MemoryError(f"长期记忆读取失败: {e}") from e
         ids, metadatas = result["ids"], result["metadatas"]
@@ -797,7 +1232,7 @@ class LongTermMemory(Memory):
         excess = len(ids) - self.max_entries
         oldest = sorted(zip(ids, metadatas), key=lambda item: item[1]["timestamp"])[:excess]
         try:
-            self.collection.delete(ids=[entry_id for entry_id, _ in oldest])
+            self.store.delete(ids=[entry_id for entry_id, _ in oldest])
         except Exception as e:
             raise MemoryError(f"长期记忆淘汰失败: {e}") from e
         logger.info(
@@ -813,8 +1248,8 @@ class LongTermMemory(Memory):
             MemoryError: 向量库删除失败时抛出。
         """
         try:
-            ids = self.collection.get(include=[])["ids"]
+            ids = self.store.get(include=[])["ids"]
             if ids:  # 部分 chromadb 版本对空 ids 列表报错
-                self.collection.delete(ids=ids)
+                self.store.delete(ids=ids)
         except Exception as e:
             raise MemoryError(f"长期记忆清空失败: {e}") from e

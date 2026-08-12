@@ -578,3 +578,188 @@ def test_plan_execute_run_stream_synthesizes_multi_step():
     agent = PlanExecuteAgent(provider=provider)
 
     assert "".join(agent.run_stream("任务")) == "结果一结果二整合答案"
+
+
+# ------------------- 模型调用重试（max_retries，开发方向 §4.3） -------------------
+
+
+class FlakyProvider(ModelProvider):
+    """前 fail_times 次调用抛出指定异常，之后返回预设响应的测试用提供者"""
+
+    def __init__(self, responses, error, fail_times):
+        self.responses = responses
+        self.error = error
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def chat(self, messages, tools=None, response_format=None):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise self.error
+        return self.responses[self.calls - 1 - self.fail_times]
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """屏蔽重试退避等待，避免测试变慢"""
+    sleeps = []
+    monkeypatch.setattr("gearlink.core.agent.time.sleep", lambda s: sleeps.append(s))
+    return sleeps
+
+
+def test_max_retries_recovers_from_retryable_error(no_sleep):
+    provider = FlakyProvider(
+        [ModelResponse(content="恢复了")],
+        ProviderError("限流", retryable=True),
+        fail_times=2,
+    )
+    agent = ReactAgent(provider=provider, max_retries=2)
+
+    assert agent.run("你好") == "恢复了"
+    assert provider.calls == 3
+    assert no_sleep == [1.0, 2.0]  # 指数退避
+
+
+def test_max_retries_default_zero_no_retry():
+    provider = FlakyProvider(
+        [ModelResponse(content="不会到达")],
+        ProviderError("限流", retryable=True),
+        fail_times=1,
+    )
+    agent = ReactAgent(provider=provider)  # 默认 max_retries=0，等价现状
+
+    with pytest.raises(ProviderError):
+        agent.run("你好")
+    assert provider.calls == 1
+
+
+def test_non_retryable_error_not_retried(no_sleep):
+    provider = FlakyProvider(
+        [ModelResponse(content="不会到达")],
+        ProviderError("鉴权失败", retryable=False),
+        fail_times=1,
+    )
+    agent = ReactAgent(provider=provider, max_retries=3)
+
+    with pytest.raises(ProviderError, match="鉴权失败"):
+        agent.run("你好")
+    assert provider.calls == 1
+    assert no_sleep == []
+
+
+def test_retry_exhausted_raises_last_error(no_sleep):
+    provider = FlakyProvider(
+        [ModelResponse(content="不会到达")],
+        ProviderError("持续限流", retryable=True),
+        fail_times=5,
+    )
+    agent = ReactAgent(provider=provider, max_retries=2)
+
+    with pytest.raises(ProviderError, match="持续限流"):
+        agent.run("你好")
+    assert provider.calls == 3  # 首次 + 2 次重试
+
+
+# ------------------- 工具白名单（tools，开发方向 §4.4） -------------------
+
+
+class ToolsCapturingProvider(ModelProvider):
+    """记录每次调用收到的 tools 参数并返回预设响应"""
+
+    def __init__(self, response):
+        self.response = response
+        self.received_tools = []
+
+    def chat(self, messages, tools=None, response_format=None):
+        self.received_tools.append(tools)
+        return self.response
+
+
+def test_tools_whitelist_filters_schemas():
+    from gearlink.core.tool import TOOL_SCHEMAS
+
+    provider = ToolsCapturingProvider(ModelResponse(content="答"))
+    agent = ReactAgent(provider=provider, tools=["get_current_time"])
+    agent.run("几点了")
+
+    names = [schema["function"]["name"] for schema in provider.received_tools[0]]
+    assert names == ["get_current_time"]
+    assert len(TOOL_SCHEMAS) > 1  # 全量注册表不受影响
+
+
+def test_tools_none_passes_all_schemas():
+    from gearlink.core.tool import TOOL_SCHEMAS
+
+    provider = ToolsCapturingProvider(ModelResponse(content="答"))
+    agent = ReactAgent(provider=provider)  # 默认 None = 全量（现状）
+    agent.run("几点了")
+
+    assert provider.received_tools[0] == TOOL_SCHEMAS
+
+
+# ------------------- 并行工具执行（parallel_tool_calls，开发方向 §4.4） -------------------
+
+
+def _register_parallel_tools():
+    from gearlink.core.tool import TOOL_REGISTRY, register_tool
+
+    schema = {
+        "description": "测试用工具",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+    if "parallel_a_test" not in TOOL_REGISTRY:
+        register_tool("parallel_a_test", lambda: "A", schema)
+        register_tool("parallel_b_test", lambda: "B", schema)
+
+
+def test_parallel_tool_calls_same_result_as_serial():
+    _register_parallel_tools()
+    tool_response = ModelResponse(
+        tool_calls=[
+            ToolCall(id="call_a", name="parallel_a_test", arguments="{}"),
+            ToolCall(id="call_b", name="parallel_b_test", arguments="{}"),
+        ]
+    )
+    final_response = ModelResponse(content="完成")
+
+    serial_agent = ReactAgent(provider=FakeProvider([tool_response, final_response]))
+    parallel_agent = ReactAgent(
+        provider=FakeProvider([tool_response, final_response]), parallel_tool_calls=True
+    )
+
+    assert serial_agent.run("任务") == parallel_agent.run("任务") == "完成"
+
+    # 并行分支的结果写回记忆顺序与串行一致（assistant 消息后按调用顺序）
+    serial_tool_msgs = [m for m in serial_agent.memory.get_messages() if m.get("role") == "tool"]
+    parallel_tool_msgs = [
+        m for m in parallel_agent.memory.get_messages() if m.get("role") == "tool"
+    ]
+    assert parallel_tool_msgs == serial_tool_msgs
+    assert [m["tool_call_id"] for m in parallel_tool_msgs] == ["call_a", "call_b"]
+
+
+def test_parallel_tool_calls_event_order_deterministic():
+    _register_parallel_tools()
+    tool_response = ModelResponse(
+        tool_calls=[
+            ToolCall(id="call_a", name="parallel_a_test", arguments="{}"),
+            ToolCall(id="call_b", name="parallel_b_test", arguments="{}"),
+        ]
+    )
+    agent = ReactAgent(
+        provider=FakeProvider([tool_response, ModelResponse(content="完成")]),
+        parallel_tool_calls=True,
+    )
+
+    types_seq = [e.type for e in agent.run_events("任务")]
+    assert types_seq == [
+        "step_start",
+        "model_message",
+        "tool_call_start",
+        "tool_call_start",
+        "tool_call_end",
+        "tool_call_end",
+        "step_start",
+        "model_message",
+        "final_answer",
+    ]

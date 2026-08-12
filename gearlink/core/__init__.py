@@ -4,13 +4,19 @@ core 只面向抽象编程，不得依赖 providers/skills/tools 中的具体实
 """
 
 from gearlink.core.agent import MAX_ITERATIONS, MAX_TOOL_RESULT_TOKENS, SYSTEM_PROMPT, ReactAgent
+from gearlink.core.events import AgentHandoffEvent, SubtaskEndEvent, TeamPlanGeneratedEvent
 from gearlink.core.memory import (
+    ChromaVectorStore,
     LongTermMemory,
     Memory,
     MemoryEntry,
     MemoryManager,
+    ProfileHookFn,
+    Session,
     ShortTermMemory,
+    VectorStore,
 )
+from gearlink.core.orchestrator import Orchestrator
 from gearlink.core.tool import (
     TOOL_REGISTRY,
     TOOL_SCHEMAS,
@@ -27,8 +33,16 @@ __all__ = [
     "Memory",
     "MemoryEntry",
     "MemoryManager",
+    "ProfileHookFn",
+    "Session",
     "ShortTermMemory",
     "LongTermMemory",
+    "VectorStore",
+    "ChromaVectorStore",
+    "Orchestrator",
+    "AgentHandoffEvent",
+    "SubtaskEndEvent",
+    "TeamPlanGeneratedEvent",
     "TOOL_REGISTRY",
     "TOOL_SCHEMAS",
     "call_tool",

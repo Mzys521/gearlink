@@ -24,6 +24,20 @@
 - `PlanExecuteAgent`：规划-执行策略（规划器分解步骤 → 内部 `ReactAgent` 执行器子循环 → 整合器汇总答案），支持 `max_steps` 截断与规划解析失败自动退化单步骤，新增 `PlanGeneratedEvent` / `PlanStepStartEvent` / `PlanStepEndEvent` 事件；
 - 全局日志开关：`enable_logging` / `disable_logging` 一键开关 `gearlink` 命名空间日志（输出到 stderr，级别可配置，幂等）；
 - 根目录 `examples/`（记忆对话示例与技能目录示例）；
+- `examples/` 补齐公共 API 分类示例：`custom_provider_demo.py` / `custom_memory_demo.py` / `event_hooks_demo.py` / `custom_tool_demo.py`（均内置无网络 Provider，免密钥可运行）；
+- 序列化：`ToolCall` / `ModelResponse` 新增 `to_dict()` / `from_dict()` 往返方法（含嵌套 tool_calls，接口设计规范 §3）；
+- 新手教程 `docs/使用教程.md`：从安装到进阶的完整教程；
+- 工程化：GitHub Actions CI（`ruff format --check` + `ruff check` + `pytest --cov`，Python 3.10/3.12 矩阵）+ `gearlink/core` 覆盖率 ≥ 80% 门禁（`pytest-cov`）+ gitleaks 密钥扫描 job；
+- 开源合规：根目录新增 MIT `LICENSE`；`requirements.txt` 补齐示例依赖 `python-dotenv`；
+- Embedding 抽象：`EmbeddingFn` 类型契约 + `LongTermMemory` 新增可选 `embedding_function` 参数（自定义向量化由应用层注入，默认行为不变，开发方向 §4.1）；
+- Provider 重试与结构化输出：`ProviderError.retryable` 可重试标记；`ReactAgent` 新增 `max_retries`（指数退避，默认 0 = 现状）；`ModelProvider.chat` / `chat_stream` 新增可选 `response_format`，`OpenAIProvider` 透传（开发方向 §4.3）；
+- 工具编排增强：`ReactAgent` 新增 `tools` 白名单与 `parallel_tool_calls` 并行执行（默认关闭）；新增 `build_tool_schema` 从函数签名 + docstring 推导 JSON Schema（开发方向 §4.4）；
+- 会话持久化：新增 `Session` dataclass 与 `MemoryManager.snapshot()` / `restore()`，支持断线恢复（开发方向 §4.5）；配套免密钥示例 `examples/session_restore_demo.py`；
+- Provider 生态：`OllamaProvider`（本地模型，无需密钥）与 `AnthropicProvider`（Messages API 双向归一化，依赖可选 `gearlink[anthropic]`）；配套示例 `examples/ollama_local_demo.py` / `examples/anthropic_demo.py`（开发方向 §4.2）；
+- MCP 接入：新增 `gearlink/mcp/` 与 `McpClient`，远端 MCP 工具以 `mcp_<server>_<tool>` 命名映射进工具注册表（依赖可选 `gearlink[mcp]`）；配套示例 `examples/mcp_client_demo.py`（开发方向 §4.6）；
+- 可观测性（开发方向 §5.1）：`TokenUsage` 计数类型与 `ModelResponse.usage` 字段（`OpenAIProvider` 透传）；`ModelMessageEvent.usage` 事件透传；`JsonlEventSink` / `jsonl_hook` / `load_jsonl_events` 事件落盘与离线回放；`UsageTracker` / `UsageRecord` 按标签聚合用量与成本估算；配套免密钥示例 `examples/observability_demo.py`；
+- 记忆深化（开发方向 §5.2）：`MemoryManager` 新增 `compress_context`（上下文摘要动态压缩，复用 `summarizer` 注入点）与 `profile_hook`（用户画像沉淀，`build_context` 优先注入）；`LongTermMemory` 新增 `relevance_threshold`（相关性阈值过滤）与 `mmr_lambda`（MMR 去冗余重排）；存储后端收敛为 `VectorStore` 协议（默认 `ChromaVectorStore`，行为不变，可用 `store=` 注入自定义后端）；配套免密钥示例 `examples/memory_advanced_demo.py`；
+- 多 Agent 协作（开发方向 §5.3）：新增编排层 `Orchestrator`（主管-工人模式：主管分派子任务 → 各工人独立执行（可 `parallel=True` 并行）→ 汇总答案；分派解析失败退化为全员兜底），新增 `TeamPlanGeneratedEvent` / `AgentHandoffEvent` / `SubtaskEndEvent` 事件；`Agent` 契约不变（纯新增）；配套免密钥示例 `examples/orchestrator_demo.py`；
 - `tests/` 基础测试套件（外部服务全部 mock）。
 
 ### Fixed

@@ -2,7 +2,13 @@
 
 import pytest
 
-from gearlink.core.tool import TOOL_REGISTRY, TOOL_SCHEMAS, call_tool, register_tool
+from gearlink.core.tool import (
+    TOOL_REGISTRY,
+    TOOL_SCHEMAS,
+    build_tool_schema,
+    call_tool,
+    register_tool,
+)
 from gearlink.exceptions import ToolError, ToolNotFoundError
 
 
@@ -81,3 +87,63 @@ def test_register_tool_raises_on_incomplete_schema():
     # 注册失败不得留下残留登记
     assert "incomplete" not in TOOL_REGISTRY
     assert all(s["function"]["name"] != "incomplete" for s in TOOL_SCHEMAS)
+
+
+# ------------------- schema 自动生成（build_tool_schema，开发方向 §4.4） -------------------
+
+
+def test_build_tool_schema_from_signature_and_docstring():
+    def multiply(a: float, b: float) -> float:
+        """计算两个数的乘积"""
+        return a * b
+
+    schema = build_tool_schema(multiply)
+    assert schema["description"] == "计算两个数的乘积"
+    assert schema["parameters"] == {
+        "type": "object",
+        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "required": ["a", "b"],
+    }
+
+
+def test_build_tool_schema_optional_params_not_required():
+    def greet(name: str, times: int = 1, note: str | None = None) -> str:
+        return name
+
+    schema = build_tool_schema(greet)
+    assert schema["parameters"]["required"] == ["name"]
+    assert schema["parameters"]["properties"]["times"] == {"type": "integer"}
+    assert schema["parameters"]["properties"]["note"] == {"type": "string"}
+
+
+def test_build_tool_schema_explicit_description_wins():
+    def echo(text: str) -> str:
+        """docstring 描述"""
+        return text
+
+    assert build_tool_schema(echo, description="显式描述")["description"] == "显式描述"
+
+
+def test_build_tool_schema_generated_works_with_register_tool():
+    def square(x: int) -> int:
+        """计算平方"""
+        return x * x
+
+    register_tool("auto_schema_square", square, build_tool_schema(square))
+    assert call_tool("auto_schema_square", {"x": 4}) == 16
+
+
+def test_build_tool_schema_raises_on_missing_annotation():
+    def bad(x):  # noqa: ANN001
+        return x
+
+    with pytest.raises(ToolError, match="缺少类型标注"):
+        build_tool_schema(bad)
+
+
+def test_build_tool_schema_raises_on_varargs():
+    def bad(*args: str) -> str:
+        return ""
+
+    with pytest.raises(ToolError, match="无法自动生成"):
+        build_tool_schema(bad)

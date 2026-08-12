@@ -1,3 +1,6 @@
 openai>=2.48.0
 pyyaml>=6.0
 chromadb>=1.5.9
+python-dotenv>=1.0  # examples/ 示例从 .env 读取密钥
+
+# 开发依赖（pytest / pytest-cov / ruff）请改用：pip install -e .[dev]

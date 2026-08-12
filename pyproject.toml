@@ -16,8 +16,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+anthropic = [
+    "anthropic>=0.34",
+]
+mcp = [
+    "mcp>=1.0",
+]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
     "ruff>=0.5",
 ]
 
@@ -39,3 +46,11 @@ select = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# 覆盖率门禁（开发规范 §6）：核心模块 gearlink/core 覆盖率 ≥ 80%，不达标 CI 失败
+[tool.coverage.run]
+source = ["gearlink/core"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

@@ -27,6 +27,21 @@
 - [x] `.gitignore` 移除对 `tests/` 的误排除
 - [x] 补齐 `tests/test_skill.py` 与 Agent 技能注入测试用例
 
+## 已完成（M1 可插拔深化，开发方向 §4.1–4.6）
+
+- [x] §4.1 Embedding 抽象：`EmbeddingFn` 类型契约 + `LongTermMemory(embedding_function=...)`
+- [x] §4.2 Provider 生态：`OllamaProvider`（无需密钥）/ `AnthropicProvider`（Messages API 归一化，依赖可选），含测试与示例
+- [x] §4.3 Provider 重试与结构化输出：`ProviderError.retryable` + `ReactAgent(max_retries=...)` 指数退避 + `response_format`
+- [x] §4.4 工具编排增强：`tools` 白名单 / `parallel_tool_calls` / `build_tool_schema` schema 自动生成
+- [x] §4.5 会话持久化：`Session` + `MemoryManager.snapshot()` / `restore()`，含断线恢复示例
+- [x] §4.6 MCP 接入：`gearlink/mcp/` 与 `McpClient`（`mcp_<server>_<tool>` 命名映射，依赖可选），含测试与示例
+
+## 已完成（M2 生产可用，开发方向 §5.1–5.3）
+
+- [x] §5.1 可观测性：`TokenUsage` + `ModelResponse.usage` 透传；`JsonlEventSink` / `jsonl_hook` / `load_jsonl_events` 事件落盘回放；`UsageTracker` 用量聚合与成本估算，含测试与示例
+- [x] §5.2 记忆深化：`MemoryManager(compress_context=...)` 上下文摘要动态压缩 + `profile_hook` 用户画像沉淀注入；`LongTermMemory(relevance_threshold=... / mmr_lambda=...)` 阈值过滤与 MMR 去冗余；存储后端收敛为 `VectorStore` 协议（默认 `ChromaVectorStore`），含测试与示例
+- [x] §5.3 多 Agent 协作：编排层 `Orchestrator`（主管-工人，可并行）+ `TeamPlanGeneratedEvent` / `AgentHandoffEvent` / `SubtaskEndEvent` 事件（`Agent` 契约不变），含测试与示例
+
 ## 待办
 
 ### 代码完善
@@ -39,20 +54,20 @@
 
 ### 数据结构与序列化
 
-- [ ] 需要持久化的 dataclass（如写入记忆的结构）补充 `to_dict()` / `from_dict()` 往返方法
+- [x] 需要持久化的 dataclass（如写入记忆的结构）补充 `to_dict()` / `from_dict()` 往返方法（`MemoryEntry` / `ToolCall` / `ModelResponse`，含往返一致性测试）
 
 ### 工程化
 
 - [x] 建立 `examples/` 目录（含记忆对话示例与技能目录示例）
-- [ ] 为其余公共 API 补齐可直接运行的示例（接口设计规范 §8）
-- [ ] CI：GitHub Actions 流水线（`ruff format --check` + `ruff check` + `pytest`）
-- [ ] `core/` 测试覆盖率 ≥ 80%（当前已有基础用例，需接入 coverage 检查）
+- [x] 为其余公共 API 补齐可直接运行的示例（接口设计规范 §8；新增自定义 Provider / Memory / 工具 / 事件回调四个免密钥示例）
+- [x] CI：GitHub Actions 流水线（`ruff format --check` + `ruff check` + `pytest`）
+- [x] `core/` 测试覆盖率 ≥ 80%（`pytest-cov` 接入，`fail_under = 80` 门禁，当前约 96%）
 
 ### 开源合规（开发规范 §9）
 
-- [ ] 确定许可证类型并添加 `LICENSE`
+- [x] 确定许可证类型并添加 `LICENSE`（MIT）
 - [x] 编写 `README.md`（项目简介、安装、快速开始、示例链接）
 - [x] 编写 `CONTRIBUTING.md` 指向 `docs/开发规范.md`
 - [x] 创建 `CHANGELOG.md`（Keep a Changelog 格式）
 - [x] 提供 `.env.example` 示例环境变量文件
-- [ ] 发布前用 `gitleaks` 审查历史提交，确认无泄露密钥（注意：旧提交中曾硬编码 API key，需处理历史记录或轮换密钥）
+- [ ] 发布前用 `gitleaks` 审查历史提交，确认无泄露密钥（CI 已接入 gitleaks 扫描 job；旧提交中曾硬编码 API key，发布前须轮换该密钥，必要时重写历史）

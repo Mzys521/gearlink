@@ -2,42 +2,61 @@
 
 只有从此处显式导出的名称才是公共 API（接口设计规范 §1.5，架构设计 §2）：
 
-- Agent：`Agent`（编排策略抽象）/ `ReactAgent`（ReAct）/ `PlanExecuteAgent`（规划-执行）；
+- Agent：`Agent`（编排策略抽象）/ `ReactAgent`（ReAct）/ `PlanExecuteAgent`（规划-执行）/
+  `Orchestrator`（多 Agent 协作主管-工人编排）；
   `run_events` 事件流含 `AgentEvent` 体系与 `HookFn` 回调；
-- 记忆：`Memory` / `MemoryEntry` / `ShortTermMemory` / `LongTermMemory` / `MemoryManager`；
+- 记忆：`Memory` / `MemoryEntry` / `Session` / `ShortTermMemory` /
+  `LongTermMemory` / `MemoryManager` / `VectorStore` / `ChromaVectorStore`；
 - 工具：`TOOL_REGISTRY` / `TOOL_SCHEMAS` / `register_tool` / `call_tool` / `set_skill_registry`；
-- 模型：`ModelProvider` / `ModelResponse` / `StreamChunk` / `ToolCall` / `OpenAIProvider`；
+- 模型：`ModelProvider` / `ModelResponse` / `StreamChunk` / `ToolCall` /
+  `OpenAIProvider` / `OllamaProvider` / `AnthropicProvider`；
 - 技能：`Skill` / `SkillRegistry` / `SkillLoader`；
+- MCP：`McpClient`（外部 MCP 服务器工具接入，另见 `gearlink.mcp`）；
 - 异常：`GearLinkError` 体系（接口设计规范 §5）；
 - 日志：`enable_logging` / `disable_logging`（全局日志开关）；
+- 可观测性：`TokenUsage` / `UsageTracker`（用量统计）/ `JsonlEventSink` / `jsonl_hook` /
+  `load_jsonl_events`（事件落盘与回放）；
 - 工具函数：`estimate_tokens` / `count_message_tokens`。
 """
 
 from gearlink.core.agent import Agent, PlanExecuteAgent, ReactAgent
 from gearlink.core.events import (
     AgentEvent,
+    AgentHandoffEvent,
     FinalAnswerEvent,
     HookFn,
+    JsonlEventSink,
     LoopAbortEvent,
     ModelMessageEvent,
     PlanGeneratedEvent,
     PlanStepEndEvent,
     PlanStepStartEvent,
     StepStartEvent,
+    SubtaskEndEvent,
+    TeamPlanGeneratedEvent,
     TextDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    jsonl_hook,
+    load_jsonl_events,
 )
+from gearlink.core.orchestrator import Orchestrator
 from gearlink.core.memory import (
+    ChromaVectorStore,
+    EmbeddingFn,
     LongTermMemory,
     Memory,
     MemoryEntry,
     MemoryManager,
+    ProfileHookFn,
+    Session,
     ShortTermMemory,
+    VectorStore,
 )
 from gearlink.core.tool import (
     TOOL_REGISTRY,
     TOOL_SCHEMAS,
+    build_tool_schema,
     call_tool,
     register_tool,
     set_skill_registry,
@@ -54,11 +73,21 @@ from gearlink.exceptions import (
     ToolError,
     ToolNotFoundError,
 )
-from gearlink.providers.base import ModelProvider, ModelResponse, StreamChunk, ToolCall
+from gearlink.mcp import McpClient
+from gearlink.providers.anthropic_provider import AnthropicProvider
+from gearlink.providers.base import (
+    ModelProvider,
+    ModelResponse,
+    StreamChunk,
+    TokenUsage,
+    ToolCall,
+)
+from gearlink.providers.ollama_provider import OllamaProvider
 from gearlink.providers.openai_provider import OpenAIProvider
 from gearlink.skills import Skill, SkillLoader, SkillRegistry
 from gearlink.utils.logging import disable_logging, enable_logging
 from gearlink.utils.token_count import count_message_tokens, estimate_tokens
+from gearlink.utils.usage import UsageRecord, UsageTracker
 
 # 导入工具包以触发内置工具注册（显式导入，非运行时扫描）
 import gearlink.tools.builtin  # noqa: F401
@@ -78,22 +107,39 @@ __all__ = [
     "PlanGeneratedEvent",
     "PlanStepStartEvent",
     "PlanStepEndEvent",
+    "Orchestrator",
+    "TeamPlanGeneratedEvent",
+    "AgentHandoffEvent",
+    "SubtaskEndEvent",
     "HookFn",
+    "JsonlEventSink",
+    "jsonl_hook",
+    "load_jsonl_events",
     "Memory",
     "MemoryEntry",
     "MemoryManager",
+    "Session",
     "ShortTermMemory",
     "LongTermMemory",
+    "EmbeddingFn",
+    "ProfileHookFn",
+    "VectorStore",
+    "ChromaVectorStore",
     "TOOL_REGISTRY",
     "TOOL_SCHEMAS",
     "call_tool",
     "register_tool",
+    "build_tool_schema",
     "set_skill_registry",
     "ModelProvider",
     "ModelResponse",
     "StreamChunk",
+    "TokenUsage",
     "ToolCall",
     "OpenAIProvider",
+    "OllamaProvider",
+    "AnthropicProvider",
+    "McpClient",
     "Skill",
     "SkillRegistry",
     "SkillLoader",
@@ -111,4 +157,6 @@ __all__ = [
     "disable_logging",
     "estimate_tokens",
     "count_message_tokens",
+    "UsageTracker",
+    "UsageRecord",
 ]
