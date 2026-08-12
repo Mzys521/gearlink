@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
 
 from gearlink.exceptions import ProviderError
@@ -144,3 +145,74 @@ def test_default_chat_stream_falls_back_to_chat():
 
     assert events[0].delta == "完整回答"
     assert events[-1].response == ModelResponse(content="完整回答")
+
+
+# ------------------- 可重试标记（retryable，开发方向 §4.3） -------------------
+
+
+def test_chat_marks_network_error_retryable():
+    provider = OpenAIProvider(api_key="sk-test")
+    provider.client = MagicMock()
+    provider.client.chat.completions.create.side_effect = openai.APIConnectionError(
+        request=MagicMock()
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        provider.chat(messages=[{"role": "user", "content": "你好"}])
+    assert exc_info.value.retryable is True
+
+
+def test_chat_marks_rate_limit_retryable():
+    provider = OpenAIProvider(api_key="sk-test")
+    provider.client = MagicMock()
+    provider.client.chat.completions.create.side_effect = openai.RateLimitError(
+        "限流", response=MagicMock(status_code=429), body=None
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        provider.chat(messages=[{"role": "user", "content": "你好"}])
+    assert exc_info.value.retryable is True
+
+
+def test_chat_marks_auth_error_not_retryable():
+    provider = OpenAIProvider(api_key="sk-test")
+    provider.client = MagicMock()
+    provider.client.chat.completions.create.side_effect = openai.AuthenticationError(
+        "鉴权失败", response=MagicMock(status_code=401), body=None
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        provider.chat(messages=[{"role": "user", "content": "你好"}])
+    assert exc_info.value.retryable is False
+
+
+def test_chat_passes_response_format_when_set():
+    fake_message = MagicMock(content='{"ok": true}', tool_calls=None)
+    fake_response = MagicMock()
+    fake_response.choices = [MagicMock(message=fake_message)]
+
+    provider = OpenAIProvider(api_key="sk-test")
+    provider.client = MagicMock()
+    provider.client.chat.completions.create.return_value = fake_response
+
+    provider.chat(
+        messages=[{"role": "user", "content": "输出 JSON"}], response_format={"type": "json_object"}
+    )
+
+    kwargs = provider.client.chat.completions.create.call_args.kwargs
+    assert kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_chat_omits_response_format_by_default():
+    fake_message = MagicMock(content="普通回答", tool_calls=None)
+    fake_response = MagicMock()
+    fake_response.choices = [MagicMock(message=fake_message)]
+
+    provider = OpenAIProvider(api_key="sk-test")
+    provider.client = MagicMock()
+    provider.client.chat.completions.create.return_value = fake_response
+
+    provider.chat(messages=[{"role": "user", "content": "你好"}])
+
+    kwargs = provider.client.chat.completions.create.call_args.kwargs
+    assert "response_format" not in kwargs  # 默认不传，行为等价现状

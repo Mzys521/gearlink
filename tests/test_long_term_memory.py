@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from gearlink import ChromaVectorStore, VectorStore
 from gearlink.core.memory import LongTermMemory, MemoryEntry
 from gearlink.exceptions import MemoryError
 
@@ -50,8 +51,10 @@ class FakeCollection:
 class FakeClient:
     def __init__(self) -> None:
         self.collection = FakeCollection()
+        self.last_embedding_function = None
 
-    def get_or_create_collection(self, name):
+    def get_or_create_collection(self, name, embedding_function=None):
+        self.last_embedding_function = embedding_function
         return self.collection
 
 
@@ -203,3 +206,165 @@ def test_memory_entry_dict_roundtrip():
     # 兼容缺少 distance 的旧数据
     legacy = {"id": "e2", "role": "user", "content": "旧数据", "timestamp": 1.0}
     assert MemoryEntry.from_dict(legacy).distance is None
+
+
+def test_default_uses_chromadb_default_embedding():
+    client = FakeClient()
+    LongTermMemory(vector_db=client, collection_name="test")
+    assert client.last_embedding_function is None
+
+
+def test_injected_embedding_function_passed_to_collection():
+    calls: list[list[str]] = []
+
+    def fake_embed(texts: list[str]) -> list[list[float]]:
+        calls.append(texts)
+        return [[float(len(text))] for text in texts]
+
+    client = FakeClient()
+    memory = LongTermMemory(vector_db=client, collection_name="test", embedding_function=fake_embed)
+    assert memory.embedding_function is fake_embed
+    assert client.last_embedding_function is not None
+
+    # 适配器转发到注入的函数（写入与检索统一走注入 embedding）
+    vectors = client.last_embedding_function(["你好", " GearLink"])
+    assert vectors == [[2.0], [9.0]]
+    assert calls == [["你好", " GearLink"]]
+
+    # 注入后读写路径正常
+    memory.add_message({"role": "user", "content": "我喜欢喝茶"})
+    hits = memory.get_relevant_messages("茶", limit=1)
+    assert len(hits) == 1
+
+
+def test_relevance_threshold_filters_low_relevance():
+    """配置 relevance_threshold 后，distance 超阈值的条目被过滤"""
+    memory = LongTermMemory(vector_db=FakeClient(), collection_name="test", relevance_threshold=1.5)
+    for content in ["相关甲", "相关乙", "偏远丙"]:
+        memory.add_message({"role": "user", "content": content})
+
+    # FakeCollection 按插入序返回 distance 0.0 / 1.0 / 2.0
+    results = memory.get_relevant_messages("查询", limit=3)
+
+    assert [r.content for r in results] == ["相关甲", "相关乙"]
+
+
+def test_relevance_threshold_default_keeps_all(memory):
+    """默认未配置阈值时不过滤（行为与现状一致）"""
+    for content in ["甲", "乙", "丙"]:
+        memory.add_message({"role": "user", "content": content})
+
+    results = memory.get_relevant_messages("查询", limit=3)
+
+    assert len(results) == 3
+
+
+def test_mmr_rerank_prefers_diverse_content():
+    """配置 mmr_lambda 后，MMR 优先选取与已选集差异大的条目"""
+    memory = LongTermMemory(vector_db=FakeClient(), collection_name="test", mmr_lambda=0.5)
+    memory.add_message({"role": "user", "content": "我喜欢喝红茶奶茶"})
+    memory.add_message({"role": "user", "content": "我喜欢喝红茶奶茶加糖"})
+    memory.add_message({"role": "user", "content": "北京今天天气很好"})
+
+    results = memory.get_relevant_messages("查询", limit=2)
+
+    # 最相关的首条不变；第二条选多样性更高的天气记忆而非近重复句
+    assert [r.content for r in results] == ["我喜欢喝红茶奶茶", "北京今天天气很好"]
+
+
+def test_mmr_lambda_one_keeps_relevance_order():
+    """mmr_lambda=1.0 退化为纯相关度排序（等价不去冗余）"""
+    memory = LongTermMemory(vector_db=FakeClient(), collection_name="test", mmr_lambda=1.0)
+    memory.add_message({"role": "user", "content": "我喜欢喝红茶奶茶"})
+    memory.add_message({"role": "user", "content": "我喜欢喝红茶奶茶加糖"})
+    memory.add_message({"role": "user", "content": "北京今天天气很好"})
+
+    results = memory.get_relevant_messages("查询", limit=2)
+
+    assert [r.content for r in results] == ["我喜欢喝红茶奶茶", "我喜欢喝红茶奶茶加糖"]
+
+
+class InMemoryStore:
+    """VectorStore 协议的自定义后端示例（内存实现）"""
+
+    def __init__(self) -> None:
+        self.records: dict[str, tuple[str, dict]] = {}
+
+    def add(self, ids, documents, metadatas) -> None:
+        for record_id, doc, meta in zip(ids, documents, metadatas):
+            self.records[record_id] = (doc, meta)
+
+    def get(self, include=None, where=None):
+        records = self.records
+        if where:
+            records = {
+                rid: value
+                for rid, value in records.items()
+                if all(value[1].get(key) == val for key, val in where.items())
+            }
+        ids = list(records)
+        return {
+            "ids": ids,
+            "documents": [records[i][0] for i in ids],
+            "metadatas": [records[i][1] for i in ids],
+        }
+
+    def query(self, query_text, n_results):
+        items = list(self.records.items())[:n_results]
+        return {
+            "ids": [record_id for record_id, _ in items],
+            "documents": [doc for _, (doc, _) in items],
+            "metadatas": [meta for _, (_, meta) in items],
+            "distances": [float(i) for i in range(len(items))],
+        }
+
+    def delete(self, ids) -> None:
+        for record_id in ids:
+            self.records.pop(record_id, None)
+
+
+def test_custom_vector_store_injection():
+    """直接注入 VectorStore 后端时读写检索路径全部可用"""
+    store = InMemoryStore()
+    memory = LongTermMemory(store=store)
+    assert isinstance(store, VectorStore)
+    assert memory.collection is None
+
+    memory.add_message({"role": "user", "content": "自定义后端记忆"})
+    assert len(store.records) == 1
+
+    results = memory.get_relevant_messages("查询", limit=1)
+    assert [r.content for r in results] == ["自定义后端记忆"]
+
+    memory.clear()
+    assert memory.get_messages() == []
+
+
+def test_custom_store_takes_precedence_over_vector_db():
+    """store 与 vector_db 同时提供时 store 优先"""
+    store = InMemoryStore()
+    client = FakeClient()
+    memory = LongTermMemory(vector_db=client, collection_name="test", store=store)
+
+    memory.add_message({"role": "user", "content": "优先级验证"})
+    assert len(store.records) == 1
+    assert len(client.collection.records) == 0
+
+
+def test_missing_vector_db_and_store_raises():
+    """vector_db 与 store 均未提供时报 ValueError"""
+    with pytest.raises(ValueError):
+        LongTermMemory()
+
+
+def test_chroma_vector_store_flattens_query_result():
+    """ChromaVectorStore 把 chromadb 嵌套列表结果扁平化为单列表"""
+    collection = FakeCollection()
+    collection.add(ids=["a"], documents=["文档"], metadatas=[{"role": "user", "timestamp": 1.0}])
+    store = ChromaVectorStore(collection)
+
+    result = store.query(query_text="查询", n_results=1)
+
+    assert result["ids"] == ["a"]
+    assert result["documents"] == ["文档"]
+    assert result["distances"] == [0.0]

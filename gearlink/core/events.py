@@ -6,11 +6,14 @@
 观察/干预机会（on_step 语义），命名回调（如 on_tool_call）可基于通用回调薄封装。
 """
 
+import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
 
-from gearlink.providers.base import ToolCall
+from gearlink.providers.base import TokenUsage, ToolCall
 
 __all__ = [
     "AgentEvent",
@@ -24,7 +27,13 @@ __all__ = [
     "PlanGeneratedEvent",
     "PlanStepStartEvent",
     "PlanStepEndEvent",
+    "TeamPlanGeneratedEvent",
+    "AgentHandoffEvent",
+    "SubtaskEndEvent",
     "HookFn",
+    "JsonlEventSink",
+    "jsonl_hook",
+    "load_jsonl_events",
 ]
 
 
@@ -43,6 +52,11 @@ class AgentEvent:
     iteration: int = 0
     timestamp: float = field(default_factory=time.time)
     type: str = "event"
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为纯 JSON 可存字典（嵌套 dataclass 递归展开，含 seq / timestamp），
+        供事件落盘与离线回放（开发方向 §5.1）。"""
+        return asdict(self)
 
 
 @dataclass
@@ -71,10 +85,12 @@ class ModelMessageEvent(AgentEvent):
     Attributes:
         content: 模型回复的文本；调用工具时可能为 None。
         tool_calls: 模型请求执行的工具调用列表；空列表表示无工具调用。
+        usage: 本次模型调用的 token 用量；提供者未上报时为 None。
     """
 
     content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: TokenUsage | None = None
     type: str = "model_message"
 
 
@@ -180,6 +196,118 @@ class PlanStepEndEvent(AgentEvent):
     type: str = "plan_step_end"
 
 
+@dataclass
+class TeamPlanGeneratedEvent(AgentEvent):
+    """多 Agent 编排：主管产出的分派清单（开发方向 §5.3）。
+
+    Attributes:
+        assignments: 子任务分派列表，每项为 {"worker": 工人名, "task": 子任务指令}。
+    """
+
+    assignments: list[dict[str, str]] = field(default_factory=list)
+    type: str = "team_plan_generated"
+
+
+@dataclass
+class AgentHandoffEvent(AgentEvent):
+    """多 Agent 编排：主管把一个子任务移交给工人（开发方向 §5.3）。
+
+    Attributes:
+        index: 子任务序号（从 0 开始，与分派清单下标对应）。
+        worker: 接收任务的工人名称。
+        task: 派给工人的子任务指令文本。
+    """
+
+    index: int = 0
+    worker: str = ""
+    task: str = ""
+    type: str = "agent_handoff"
+
+
+@dataclass
+class SubtaskEndEvent(AgentEvent):
+    """多 Agent 编排：某个子任务执行完成（开发方向 §5.3）。
+
+    Attributes:
+        index: 子任务序号（从 0 开始，与分派清单下标对应）。
+        worker: 执行该子任务的工人名称。
+        result: 工人给出的结果文本。
+    """
+
+    index: int = 0
+    worker: str = ""
+    result: str = ""
+    type: str = "subtask_end"
+
+
 #: 回调钩子签名：接收一个事件，可返回替换事件；返回 None 表示不修改。
 #: 回调应保持观察/干预语义（如日志记录、内容校验），避免产生依赖调用顺序的副作用。
 HookFn = Callable[[AgentEvent], AgentEvent | None]
+
+
+class JsonlEventSink:
+    """事件落盘器：把事件流逐条序列化为 JSONL（开发方向 §5.1）。
+
+    每行一个事件（含 ``seq`` / ``timestamp``），支持离线回放与调试；
+    追加写入，多次运行可沉淀到同一文件。可作为上下文管理器使用。
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        """打开目标文件（追加模式）。
+
+        Args:
+            path: JSONL 文件路径；不存在时自动创建。
+        """
+        self.path = Path(path)
+        self._file = self.path.open("a", encoding="utf-8")
+
+    def write(self, event: AgentEvent) -> None:
+        """写入一个事件并立即刷盘（进程崩溃也不丢已产出事件）。"""
+        self._file.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        self._file.flush()
+
+    def close(self) -> None:
+        """关闭底层文件（幂等）。"""
+        if not self._file.closed:
+            self._file.close()
+
+    def __enter__(self) -> "JsonlEventSink":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+
+def jsonl_hook(sink: JsonlEventSink) -> HookFn:
+    """构造把事件写入 JSONL sink 的回调钩子（纯观察，不修改事件）。
+
+    Args:
+        sink: 已打开的 :class:`JsonlEventSink` 实例。
+
+    Returns:
+        可直接传入 ``ReactAgent(hooks=...)`` / ``add_hook`` 的回调。
+    """
+
+    def hook(event: AgentEvent) -> None:
+        sink.write(event)
+        return None
+
+    return hook
+
+
+def load_jsonl_events(path: str | Path) -> list[dict[str, Any]]:
+    """回放 JSONL 事件文件：逐行解析为字典列表（按写入顺序）。
+
+    Args:
+        path: :class:`JsonlEventSink` 写出的文件路径。
+
+    Returns:
+        事件字典列表；空行跳过。
+    """
+    events: list[dict[str, Any]] = []
+    with Path(path).open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                events.append(json.loads(line))
+    return events

@@ -20,6 +20,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Generator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from gearlink.core.events import (
@@ -38,12 +39,12 @@ from gearlink.core.events import (
 )
 from gearlink.core.memory import Memory, MemoryManager, ShortTermMemory
 from gearlink.core.tool import TOOL_SCHEMAS, call_tool, set_skill_registry
-from gearlink.exceptions import GearLinkError
-from gearlink.providers.base import ModelProvider, ModelResponse
+from gearlink.exceptions import GearLinkError, ProviderError
+from gearlink.providers.base import ModelProvider, ModelResponse, ToolCall
 from gearlink.skills import SkillRegistry
 from gearlink.utils.token_count import estimate_tokens
 
-# ------------------- 系统提示配置 -------------------
+# ------------------- 共享常量 -------------------
 
 #: 内置系统提示：引导 Agent 优先使用工具回答实时问题
 SYSTEM_PROMPT = (
@@ -67,24 +68,11 @@ MAX_TOOL_RESULT_TOKENS = 2000
 #: 达到最大迭代次数时的兜底文案（run / run_events / run_stream 共用）
 _MAX_ITERATIONS_FALLBACK = "已达到最大推理轮数，无法得出最终答案。"
 
+#: 模型调用重试的指数退避基数（秒）：第 N 次重试前等待 base * 2**N 秒
+_RETRY_BACKOFF_BASE = 1.0
+
 #: 模块级日志器：记录 ReAct 循环中的工具调用等过程信息
 logger = logging.getLogger(__name__)
-
-
-def _build_system_prompt(skill_registry: SkillRegistry | None = None) -> str:
-    """组装系统提示：基础提示 + 可用技能列表（仅当注入非空注册表时）。
-
-    Args:
-        skill_registry: 技能注册表；None 或不含技能时返回基础提示。
-
-    Returns:
-        组装后的系统提示文本。
-    """
-    skills = skill_registry.list_all() if skill_registry is not None else []
-    if not skills:
-        return SYSTEM_PROMPT
-    skill_lines = "\n".join(f"- {skill.name}: {skill.description}" for skill in skills)
-    return f"{SYSTEM_PROMPT}\n{_SKILL_HINT_PROMPT}\n{skill_lines}"
 
 
 class Agent(ABC):
@@ -225,6 +213,25 @@ class Agent(ABC):
         """
 
 
+# ------------------- ReAct 策略 -------------------
+
+
+def _build_system_prompt(skill_registry: SkillRegistry | None = None) -> str:
+    """组装系统提示：基础提示 + 可用技能列表（仅当注入非空注册表时）。
+
+    Args:
+        skill_registry: 技能注册表；None 或不含技能时返回基础提示。
+
+    Returns:
+        组装后的系统提示文本。
+    """
+    skills = skill_registry.list_all() if skill_registry is not None else []
+    if not skills:
+        return SYSTEM_PROMPT
+    skill_lines = "\n".join(f"- {skill.name}: {skill.description}" for skill in skills)
+    return f"{SYSTEM_PROMPT}\n{_SKILL_HINT_PROMPT}\n{skill_lines}"
+
+
 class ReactAgent(Agent):
     """ReAct Agent：推理(Reason) -> 行动(Act) -> 观察(Observe) 循环"""
 
@@ -235,6 +242,9 @@ class ReactAgent(Agent):
         retrieve_every_iteration: bool = False,
         skill_registry: SkillRegistry | None = None,
         hooks: list[HookFn] | None = None,
+        max_retries: int = 0,
+        tools: list[str] | None = None,
+        parallel_tool_calls: bool = False,
     ) -> None:
         """初始化 Agent。
 
@@ -251,9 +261,21 @@ class ReactAgent(Agent):
                 自行注入 memory 时须自行添加所需的系统提示消息。
             hooks: 事件回调列表（on_step 语义）；每个事件产出时按序调用，
                 可返回替换事件（None 表示不修改）。默认空列表，等价于无回调。
+            max_retries: 模型调用失败时的最大重试次数；0 表示不重试（现状，
+                开发方向 §4.3）。仅对标记 retryable 的 ProviderError（网络/限流
+                等瞬时故障）重试，鉴权等确定性错误直接抛出；指数退避等待。
+            tools: 工具白名单（工具名列表）；None 表示全量可用（现状）。指定后
+                仅把名单内工具的 schema 传给模型，降低误选与 token 开销
+                （开发方向 §4.4）；工具调度本身不受限制。
+            parallel_tool_calls: 同一轮多个工具调用是否并行执行；False 表示串行
+                （现状）。开启时用线程池并行，事件产出顺序与结果写回记忆的
+                顺序保持不变（仅要求工具自身线程安全）。
         """
         super().__init__(provider=provider, hooks=hooks)
         self.retrieve_every_iteration = retrieve_every_iteration
+        self.max_retries = max_retries
+        self.tools = tools
+        self.parallel_tool_calls = parallel_tool_calls
         if skill_registry is not None:
             # 供 load_skill 工具按名解析技能（core/tool.py 全局注入点）
             set_skill_registry(skill_registry)
@@ -274,6 +296,17 @@ class ReactAgent(Agent):
         if isinstance(self.memory, MemoryManager):
             return self.memory.build_context(query or "")
         return self.memory.get_messages()
+
+    def _available_tool_schemas(self) -> list[dict[str, Any]]:
+        """返回本轮可用的工具 schema（按白名单过滤，开发方向 §4.4）。
+
+        Returns:
+            全量 TOOL_SCHEMAS；配置了 tools 白名单时仅返回名单内的条目。
+        """
+        if self.tools is None:
+            return TOOL_SCHEMAS
+        allowed = set(self.tools)
+        return [schema for schema in TOOL_SCHEMAS if schema["function"]["name"] in allowed]
 
     def run_events(self, user_input: str, *, stream: bool = False) -> Iterator[AgentEvent]:
         """执行一次用户请求，逐步产出 ReAct 循环的事件（循环的唯一实现）。
@@ -308,26 +341,16 @@ class ReactAgent(Agent):
             query = user_input if (iteration == 0 or self.retrieve_every_iteration) else None
             messages = self._build_messages(query)
 
-            if stream:
-                # 流式推理：实时转出文本增量，终止事件携带累积后的完整响应
-                response: ModelResponse | None = None
-                for chunk in self.provider.chat_stream(messages=messages, tools=TOOL_SCHEMAS):
-                    if chunk.delta:
-                        seq = yield from self._emit_event(
-                            TextDeltaEvent(delta=chunk.delta, iteration=iteration), seq
-                        )
-                    if chunk.response is not None:
-                        response = chunk.response
-                if response is None:
-                    raise GearLinkError("提供者的流式响应缺少终止事件（未携带完整 response）")
-            else:
-                response = self.provider.chat(messages=messages, tools=TOOL_SCHEMAS)
+            response, seq = yield from self._call_model(
+                messages, iteration=iteration, stream=stream, seq=seq
+            )
 
             seq = yield from self._emit_event(
                 ModelMessageEvent(
                     iteration=iteration,
                     content=response.content,
                     tool_calls=response.tool_calls,
+                    usage=response.usage,
                 ),
                 seq,
             )
@@ -345,6 +368,72 @@ class ReactAgent(Agent):
 
         # 达到最大迭代次数仍未得到答案
         yield from self._emit_event(LoopAbortEvent(reason=_MAX_ITERATIONS_FALLBACK), seq)
+
+    def _call_model(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        iteration: int,
+        stream: bool,
+        seq: int,
+    ) -> Generator[AgentEvent, None, tuple[ModelResponse, int]]:
+        """调用模型（含可选重试），流式时同步转出文本增量事件。
+
+        重试策略（开发方向 §4.3）：仅对标记 retryable 的 ProviderError（网络/
+        限流等瞬时故障）重试，指数退避等待；鉴权等确定性错误与已产出文本
+        增量的流式调用不重试，直接向上抛出。
+
+        Args:
+            messages: 本轮请求消息。
+            iteration: 当前 ReAct 轮次（事件携带）。
+            stream: True 时使用 chat_stream 并产出 TextDeltaEvent。
+            seq: 事件流当前序号。
+
+        Yields:
+            TextDeltaEvent: 仅 stream=True 时的文本增量。
+
+        Returns:
+            (模型响应, 更新后的事件序号) 二元组。
+
+        Raises:
+            ProviderError: 不可重试或重试耗尽后的模型调用失败。
+            GearLinkError: 流式响应缺少携带完整响应的终止事件。
+        """
+        attempt = 0
+        tool_schemas = self._available_tool_schemas()
+        while True:
+            emitted_delta = False
+            try:
+                if stream:
+                    # 流式推理：实时转出文本增量，终止事件携带累积后的完整响应
+                    response: ModelResponse | None = None
+                    for chunk in self.provider.chat_stream(messages=messages, tools=tool_schemas):
+                        if chunk.delta:
+                            emitted_delta = True
+                            seq = yield from self._emit_event(
+                                TextDeltaEvent(delta=chunk.delta, iteration=iteration), seq
+                            )
+                        if chunk.response is not None:
+                            response = chunk.response
+                    if response is None:
+                        raise GearLinkError("提供者的流式响应缺少终止事件（未携带完整 response）")
+                    return response, seq
+                return self.provider.chat(messages=messages, tools=tool_schemas), seq
+            except ProviderError as e:
+                # 仅重试可重试错误（网络/限流）；鉴权等确定性错误直接抛出；
+                # 已产出文本增量的流式调用不重试（避免重复输出）
+                if not e.retryable or attempt >= self.max_retries or (stream and emitted_delta):
+                    raise
+                delay = _RETRY_BACKOFF_BASE * 2**attempt
+                logger.warning(
+                    "[重试] 模型调用失败（%s），%.1f 秒后重试（%d/%d）",
+                    e,
+                    delay,
+                    attempt + 1,
+                    self.max_retries,
+                )
+                time.sleep(delay)
+                attempt += 1
 
     def _execute_tool_calls(
         self, response: ModelResponse, *, iteration: int, seq: int
@@ -381,50 +470,56 @@ class ReactAgent(Agent):
             }
         )
 
-        # 观察：执行每个工具调用，并将结果写回记忆
-        for tool_call in response.tool_calls:
-            name = tool_call.name
-            # 解析参数（若解析失败则使用空字典）
-            try:
-                arguments = json.loads(tool_call.arguments or "{}")
-            except json.JSONDecodeError:
-                arguments = {}
+        # 观察：执行工具调用并把结果写回记忆（串行或并行，见 parallel_tool_calls）
+        if self.parallel_tool_calls and len(response.tool_calls) > 1:
+            # 并行分支（开发方向 §4.4）：按序产出全部 start 事件 → 线程池并行执行
+            # → 按原顺序产出 end 事件并写回记忆，保证事件与写回顺序确定不变
+            for tool_call in response.tool_calls:
+                seq = yield from self._emit_event(
+                    ToolCallStartEvent(
+                        iteration=iteration,
+                        tool_call_id=tool_call.id,
+                        name=tool_call.name,
+                        arguments=tool_call.arguments or "{}",
+                    ),
+                    seq,
+                )
+            with ThreadPoolExecutor(max_workers=len(response.tool_calls)) as pool:
+                outcomes = list(pool.map(self._run_single_tool, response.tool_calls))
+            for tool_call, outcome in zip(response.tool_calls, outcomes):
+                seq = yield from self._emit_event(
+                    ToolCallEndEvent(
+                        iteration=iteration,
+                        tool_call_id=tool_call.id,
+                        name=tool_call.name,
+                        result=outcome[0],
+                        truncated=outcome[1],
+                        error=outcome[2],
+                    ),
+                    seq,
+                )
+                self._write_tool_result(tool_call.id, outcome[0])
+            return seq
 
+        # 串行分支（现状）：逐个执行，start/end 事件交替产出
+        for tool_call in response.tool_calls:
             seq = yield from self._emit_event(
                 ToolCallStartEvent(
                     iteration=iteration,
                     tool_call_id=tool_call.id,
-                    name=name,
+                    name=tool_call.name,
                     arguments=tool_call.arguments or "{}",
                 ),
                 seq,
             )
 
-            # 执行工具（call_tool 会从 TOOL_REGISTRY 中查找并调用）
-            try:
-                result = call_tool(name, arguments)
-                # 将结果转为 JSON 字符串，以便统一存储
-                result_text = json.dumps(result, ensure_ascii=False)
-                # 超出预算时按 4 字符/token 的启发式反推字符上限截断
-                truncated = estimate_tokens(result_text) > MAX_TOOL_RESULT_TOKENS
-                if truncated:
-                    result_text = (
-                        result_text[: MAX_TOOL_RESULT_TOKENS * 4] + "\n...(工具结果过长，已截断)"
-                    )
-                error: str | None = None
-            except GearLinkError as e:
-                # 工具执行失败是可恢复信号：将错误信息作为结果写回，让模型自行处理
-                result_text = f"工具调用失败: {e}"
-                error = str(e)
-                truncated = False
-
-            logger.info("[工具调用] %s(%s) -> %s", name, arguments, result_text)
+            result_text, truncated, error = self._run_single_tool(tool_call)
 
             seq = yield from self._emit_event(
                 ToolCallEndEvent(
                     iteration=iteration,
                     tool_call_id=tool_call.id,
-                    name=name,
+                    name=tool_call.name,
                     result=result_text,
                     truncated=truncated,
                     error=error,
@@ -432,19 +527,59 @@ class ReactAgent(Agent):
                 seq,
             )
 
-            # 将工具执行结果作为 tool 角色消息存入记忆
-            self.memory.add_message(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_text,
-                }
-            )
+            self._write_tool_result(tool_call.id, result_text)
 
         return seq
 
+    def _run_single_tool(self, tool_call: ToolCall) -> tuple[str, bool, str | None]:
+        """执行单个工具调用（含参数解析与错误兜底，可被线程池并行调用）。
 
-# ------------------- 规划-执行（PlanExecuteAgent） -------------------
+        Args:
+            tool_call: 模型返回的工具调用请求。
+
+        Returns:
+            (结果文本, 是否截断, 错误信息) 三元组；错误信息非 None 表示
+            可恢复失败（结果已序列化，由调用方写回记忆交给模型处理）。
+        """
+        # 解析参数（若解析失败则使用空字典）
+        try:
+            arguments = json.loads(tool_call.arguments or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+
+        # 执行工具（call_tool 会从 TOOL_REGISTRY 中查找并调用）
+        try:
+            result = call_tool(tool_call.name, arguments)
+            # 将结果转为 JSON 字符串，以便统一存储
+            result_text = json.dumps(result, ensure_ascii=False)
+            # 超出预算时按 4 字符/token 的启发式反推字符上限截断
+            truncated = estimate_tokens(result_text) > MAX_TOOL_RESULT_TOKENS
+            if truncated:
+                result_text = (
+                    result_text[: MAX_TOOL_RESULT_TOKENS * 4] + "\n...(工具结果过长，已截断)"
+                )
+            error: str | None = None
+        except GearLinkError as e:
+            # 工具执行失败是可恢复信号：将错误信息作为结果写回，让模型自行处理
+            result_text = f"工具调用失败: {e}"
+            error = str(e)
+            truncated = False
+
+        logger.info("[工具调用] %s(%s) -> %s", tool_call.name, arguments, result_text)
+        return result_text, truncated, error
+
+    def _write_tool_result(self, tool_call_id: str, result_text: str) -> None:
+        """将工具执行结果作为 tool 角色消息存入记忆。"""
+        self.memory.add_message(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": result_text,
+            }
+        )
+
+
+# ------------------- 规划-执行策略 -------------------
 
 #: 规划器系统提示：要求把任务分解为 JSON 步骤数组
 _PLANNER_SYSTEM_PROMPT = (

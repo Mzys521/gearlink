@@ -9,7 +9,23 @@ class GearLinkError(Exception):
 
 
 class ProviderError(GearLinkError):
-    """模型服务调用失败（网络、鉴权、限流等）"""
+    """模型服务调用失败（网络、鉴权、限流等）。
+
+    Attributes:
+        retryable: 是否为可重试错误（网络故障、限流等瞬时异常）；
+            鉴权失败等确定性错误为 False。重试策略由调用方决定
+            （如 `ReactAgent(max_retries=...)`，开发方向 §4.3）。
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        """初始化异常。
+
+        Args:
+            message: 面向开发者的错误描述（含模型名等定位信息，不泄露密钥）。
+            retryable: 是否可重试；默认 False（等价于无此字段的历史行为）。
+        """
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class ToolError(GearLinkError):
