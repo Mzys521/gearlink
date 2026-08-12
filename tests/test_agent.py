@@ -1,9 +1,13 @@
-"""ReactAgent 测试：使用 FakeProvider 替代真实模型服务。"""
+"""ReactAgent / PlanExecuteAgent 测试：使用 FakeProvider 替代真实模型服务。"""
 
 from pathlib import Path
 
-from gearlink.core.agent import MAX_ITERATIONS, SYSTEM_PROMPT, ReactAgent
+import pytest
+
+from gearlink.core.agent import MAX_ITERATIONS, SYSTEM_PROMPT, PlanExecuteAgent, ReactAgent
+from gearlink.core.events import FinalAnswerEvent, PlanGeneratedEvent
 from gearlink.core.memory import LongTermMemory, MemoryManager, ShortTermMemory
+from gearlink.exceptions import ProviderError
 from gearlink.providers.base import ModelProvider, ModelResponse, StreamChunk, ToolCall
 from gearlink.skills import Skill, SkillLoader, SkillRegistry
 
@@ -320,3 +324,257 @@ def test_run_stream_yields_fallback_on_max_iterations():
     agent = ReactAgent(provider=FakeStreamingProvider([tool_response] * MAX_ITERATIONS))
 
     assert "".join(agent.run_stream("循环调用")) == "已达到最大推理轮数，无法得出最终答案。"
+
+
+def test_run_events_emits_full_sequence():
+    """run_events 应按序产出 ReAct 循环事件，run() 等价于消费事件流"""
+    tool_response = ModelResponse(
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="get_current_time", arguments="{}")],
+    )
+    final_response = ModelResponse(content="现在是中午。")
+    agent = ReactAgent(provider=FakeProvider([tool_response, final_response]))
+
+    events = list(agent.run_events("现在几点了？"))
+
+    types = [e.type for e in events]
+    assert types == [
+        "step_start",
+        "model_message",
+        "tool_call_start",
+        "tool_call_end",
+        "step_start",
+        "model_message",
+        "final_answer",
+    ]
+    # 序号全局递增
+    assert [e.seq for e in events] == list(range(len(events)))
+    # 收敛事件携带最终答案
+    assert isinstance(events[-1], FinalAnswerEvent)
+    assert events[-1].content == "现在是中午。"
+    # 工具事件携带工具名与执行结果（无错误）
+    assert events[2].name == "get_current_time" and events[2].arguments == "{}"
+    assert events[3].name == "get_current_time"
+    assert events[3].error is None
+
+
+def test_run_events_hooks_can_observe_and_replace():
+    """hooks 回调可观察每个事件，也可返回替换事件修改内容"""
+    seen: list[str] = []
+
+    def replace_final(event):
+        if isinstance(event, FinalAnswerEvent):
+            return FinalAnswerEvent(iteration=event.iteration, content="被回调替换的答案")
+        seen.append(event.type)
+        return None
+
+    agent = ReactAgent(
+        provider=FakeProvider([ModelResponse(content="你好！")]), hooks=[replace_final]
+    )
+
+    assert agent.run("你好") == "被回调替换的答案"
+    # 回调观察到全部非收敛事件，替换事件未再进入回调
+    assert seen == ["step_start", "model_message"]
+
+
+def test_run_stream_emits_tool_events():
+    """run_stream 内部同样经事件流执行，工具调用事件可被回调观察"""
+    tool_events: list[str] = []
+
+    def collect(event):
+        if event.type in ("tool_call_start", "tool_call_end"):
+            tool_events.append(event.type)
+        return None
+
+    tool_response = ModelResponse(
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="get_current_time", arguments="{}")],
+    )
+    agent = ReactAgent(
+        provider=FakeStreamingProvider([tool_response, ModelResponse(content="现在是中午。")]),
+        hooks=[collect],
+    )
+
+    assert "".join(agent.run_stream("现在几点了？")) == "现在是中午。"
+    assert tool_events == ["tool_call_start", "tool_call_end"]
+
+
+class PlanStreamProvider(ModelProvider):
+    """规划器/整合器走非流式 chat、执行器走流式 chat_stream 的测试用提供者"""
+
+    def __init__(self, responses: list[ModelResponse], chunk_size: int = 2) -> None:
+        self.responses = responses
+        self.chunk_size = chunk_size
+        self.calls = 0
+
+    def chat(self, messages, tools=None) -> ModelResponse:
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+    def chat_stream(self, messages, tools=None):
+        response = self.responses[self.calls]
+        self.calls += 1
+        content = response.content or ""
+        for i in range(0, len(content), self.chunk_size):
+            yield StreamChunk(delta=content[i : i + self.chunk_size])
+        yield StreamChunk(response=response)
+
+
+def test_plan_execute_runs_steps_and_synthesizes():
+    """多步骤任务：规划 → 逐步执行 → 整合出最终答案"""
+    provider = FakeProvider(
+        [
+            ModelResponse(content='["查询当前时间", "生成问候语"]'),
+            ModelResponse(content="现在是中午。"),
+            ModelResponse(content="你好，注意休息。"),
+            ModelResponse(content="现在是中午，祝你午后愉快。"),
+        ]
+    )
+    agent = PlanExecuteAgent(provider=provider)
+
+    assert agent.run("生成问候") == "现在是中午，祝你午后愉快。"
+    # 规划器 + 两步执行器 + 整合器共 4 次模型调用
+    assert provider.calls == 4
+
+
+def test_plan_execute_falls_back_to_single_step_on_parse_failure():
+    """规划器输出无法解析时，退化为单步骤直接执行原任务"""
+    provider = FakeProvider(
+        [
+            ModelResponse(content="抱歉，我直接回答：你好！"),
+            ModelResponse(content="直接回答的结果"),
+        ]
+    )
+    agent = PlanExecuteAgent(provider=provider)
+
+    assert agent.run("你好") == "直接回答的结果"
+    # 规划（失败）+ 单步骤执行，共 2 次调用
+    assert provider.calls == 2
+
+
+def test_plan_execute_handles_markdown_fenced_plan():
+    """规划器输出带 markdown 代码围栏时，仍能正确解析步骤"""
+    provider = FakeProvider(
+        [
+            ModelResponse(content='```json\n["步骤一"]\n```'),
+            ModelResponse(content="结果一"),
+        ]
+    )
+    agent = PlanExecuteAgent(provider=provider)
+
+    assert agent.run("任务") == "结果一"
+    assert provider.calls == 2
+
+
+def test_plan_execute_truncates_plan_to_max_steps():
+    """规划步骤超出 max_steps 时截断，截断后单步骤不触发整合器"""
+    provider = FakeProvider(
+        [
+            ModelResponse(content='["步骤一", "步骤二", "步骤三"]'),
+            ModelResponse(content="结果一"),
+        ]
+    )
+    agent = PlanExecuteAgent(provider=provider, max_steps=1)
+
+    assert agent.run("任务") == "结果一"
+    # 规划 + 1 步执行（截断到 max_steps），共 2 次调用
+    assert provider.calls == 2
+
+
+def test_plan_execute_events_sequence_and_seq_monotonic():
+    """run_events 事件序列：规划事件 + 执行器事件 + 最终答案，seq 全局递增"""
+    provider = FakeProvider(
+        [
+            ModelResponse(content='["步骤一", "步骤二"]'),
+            ModelResponse(content="结果一"),
+            ModelResponse(content="结果二"),
+            ModelResponse(content="最终答案"),
+        ]
+    )
+    agent = PlanExecuteAgent(provider=provider)
+
+    events = list(agent.run_events("任务"))
+    types = [e.type for e in events]
+
+    assert types == [
+        "plan_generated",
+        "plan_step_start",
+        "step_start",  # 执行器 ReAct 循环
+        "model_message",
+        "final_answer",  # 步骤一的结果
+        "plan_step_end",
+        "plan_step_start",
+        "step_start",
+        "model_message",
+        "final_answer",  # 步骤二的结果
+        "plan_step_end",
+        "final_answer",  # 整合后的最终答案
+    ]
+    # 执行器事件经转发重新编号，整个事件流 seq 全局递增
+    assert [e.seq for e in events] == list(range(len(events)))
+    # 规划事件携带步骤清单，最终事件为整合答案
+    assert isinstance(events[0], PlanGeneratedEvent)
+    assert events[0].steps == ["步骤一", "步骤二"]
+    assert isinstance(events[-1], FinalAnswerEvent)
+    assert events[-1].content == "最终答案"
+
+
+def test_plan_execute_hooks_observe_plan_and_executor_events():
+    """hooks 经 add_hook 同步注册，可观察到规划事件与执行器工具事件"""
+    seen: list[str] = []
+
+    def collect(event):
+        seen.append(event.type)
+        return None
+
+    planner = ModelResponse(content='["查询时间"]')
+    tool_response = ModelResponse(
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="get_current_time", arguments="{}")],
+    )
+    provider = FakeProvider([planner, tool_response, ModelResponse(content="现在是中午。")])
+    agent = PlanExecuteAgent(provider=provider, hooks=[collect])
+
+    assert agent.run("任务") == "现在是中午。"
+    assert "plan_generated" in seen
+    assert "tool_call_start" in seen
+    assert "tool_call_end" in seen
+
+
+def test_plan_execute_propagates_provider_error():
+    """规划器调用失败时，ProviderError 应向上传播（不静默吞错）"""
+
+    class RaisingProvider(ModelProvider):
+        def chat(self, messages, tools=None):
+            raise ProviderError("模拟服务不可用")
+
+    agent = PlanExecuteAgent(provider=RaisingProvider())
+
+    with pytest.raises(ProviderError):
+        agent.run("任务")
+
+
+def test_plan_execute_run_stream_yields_step_text():
+    """流式模式：单步骤任务的文本增量经事件流逐段流出"""
+    provider = PlanStreamProvider(
+        [ModelResponse(content='["直接回答"]'), ModelResponse(content="你好，我是助手。")]
+    )
+    agent = PlanExecuteAgent(provider=provider)
+
+    assert "".join(agent.run_stream("你好")) == "你好，我是助手。"
+
+
+def test_plan_execute_run_stream_synthesizes_multi_step():
+    """流式模式：多步骤任务的文本 = 各步流式文本 + 整合答案增量"""
+    provider = PlanStreamProvider(
+        [
+            ModelResponse(content='["步骤一", "步骤二"]'),
+            ModelResponse(content="结果一"),
+            ModelResponse(content="结果二"),
+            ModelResponse(content="整合答案"),
+        ]
+    )
+    agent = PlanExecuteAgent(provider=provider)
+
+    assert "".join(agent.run_stream("任务")) == "结果一结果二整合答案"

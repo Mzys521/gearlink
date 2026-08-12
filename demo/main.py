@@ -1,12 +1,15 @@
-"""GearLink 综合 Agent 示例：工具 + 长期记忆 + 技能 + 流式输出
+"""GearLink 综合 Agent 示例：工具 + 长期记忆 + 技能 + 流式输出 + 事件流钩子 + 日志开关
 
-一个可交互的命令行助手，整合了框架的四个可插拔维度：
+一个可交互的命令行助手，整合了框架的可插拔维度与最新能力：
 
 - 工具：自定义工具（add / multiply / get_weather）与内置工具（get_current_time），
   经 `register_tool` 显式登记后由 ReAct 循环按需调用；
 - 记忆：短期滑窗 + chromadb 向量长期记忆 + 会话摘要沉淀（MemoryManager）；
 - 技能：从 demo/skills/ 发现的技能包，模型经 `load_skill` 工具按需加载完整指令；
-- 流式输出：`run_stream` 逐片段产出模型文本。
+- 流式输出：`run_stream` 逐片段产出模型文本；
+- 事件流钩子：`hooks=[on_step]` 实时打印工具调用状态（ToolCallStartEvent /
+  ToolCallEndEvent，观察 ReAct 循环）；
+- 日志开关：`enable_logging` 一键开启框架内部日志（替代 logging.basicConfig）。
 
 运行方式（项目根目录下，须先 `pip install -e .` 安装本包）：
     python demo/main.py
@@ -20,7 +23,6 @@
     clear   清空短期与长期记忆
 """
 
-import logging
 from pathlib import Path
 
 import chromadb
@@ -37,9 +39,10 @@ from gearlink import (
     ShortTermMemory,
     SkillLoader,
     SkillRegistry,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
+    enable_logging,
 )
-
-logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 DEMO_DIR = Path(__file__).resolve().parent
 ROOT = DEMO_DIR.parent
@@ -110,7 +113,31 @@ def build_memory() -> MemoryManager:
     )
 
 
+def on_step(event):
+    """on_step 事件钩子：实时展示 ReAct 循环中的工具调用（事件流回调示例）。
+
+    Args:
+        event: AgentEvent 子类实例；本钩子只关心工具调用前后的事件。
+
+    Returns:
+        None 表示不修改事件（纯观察）。
+    """
+    if isinstance(event, ToolCallStartEvent):
+        print(f"\n  [工具] {event.name}({event.arguments})", flush=True)
+    elif isinstance(event, ToolCallEndEvent):
+        if event.error is None:
+            preview = event.result if len(event.result) <= 60 else event.result[:60] + "…"
+            print(f"  [工具] {event.name} 完成: {preview}", flush=True)
+        else:
+            print(f"  [工具] {event.name} 失败: {event.error}", flush=True)
+    return None
+
+
 def main() -> None:
+    # 一键开启框架内部日志（旧代码的 logging.basicConfig 由 enable_logging 取代；
+    # 对应关闭为 disable_logging）
+    enable_logging()
+
     skill_registry = build_skill_registry()
     memory = build_memory()
 
@@ -122,6 +149,7 @@ def main() -> None:
         memory=memory,
         retrieve_every_iteration=True,
         skill_registry=skill_registry,
+        hooks=[on_step],
     )
 
     skill_names = ", ".join(s.name for s in skill_registry.list_all()) or "（无）"
