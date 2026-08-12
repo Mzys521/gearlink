@@ -1,10 +1,11 @@
 # GearLink
 
-轻量级 Agent 框架：一个 ReAct 循环编排器 + 三个可插拔维度（模型、记忆、工具）+ 技能扩展，不引入重型框架。
+轻量级 Agent 框架：多策略 Agent 编排（ReAct / 规划-执行）+ 三个可插拔维度（模型、记忆、工具）+ 技能扩展，不引入重型框架。
 
 ## 特性
 
-- **ReAct 循环**：`ReactAgent` 编排 Reason → Act → Observe，工具失败作为可恢复信号写回模型处理，`run_stream` 支持流式输出；
+- **多策略 Agent**：`Agent` 抽象统一 `run` / `run_stream` / `run_events` 契约；`ReactAgent` 编排 Reason → Act → Observe，工具失败作为可恢复信号写回模型处理；`PlanExecuteAgent` 先规划后执行（规划 → 步骤子循环 → 整合），任务分解更可控；
+- **事件流 + 回调**：`run_events` 逐步产出 `AgentEvent` 体系事件，`hooks` / `add_hook` 注入回调实现 on_step 观察与干预；
 - **模型可插拔**：面向 `ModelProvider` 抽象编程，内置 OpenAI 兼容实现（OpenAI / DeepSeek）；
 - **记忆可插拔**：短期滑窗 `ShortTermMemory`、chromadb 向量长期记忆 `LongTermMemory`、以及组合两者的 `MemoryManager`（上下文预算、会话摘要沉淀、检索注入）；
 - **工具注册表**：「注册表 + JSON Schema + 调度器」三件套，`register_tool` 显式登记；
@@ -125,24 +126,61 @@ agent = ReactAgent(provider=OpenAIProvider(), skill_registry=registry)
 print(agent.run("帮我做一次代码审查"))
 ```
 
+### 规划-执行 Agent
+
+任务较复杂时改用 `PlanExecuteAgent`：先规划（分解步骤），再逐步执行（复用
+`ReactAgent` 子循环，支持工具），最后整合为最终答案：
+
+```python
+from gearlink import OpenAIProvider, PlanExecuteAgent
+
+agent = PlanExecuteAgent(provider=OpenAIProvider(), max_steps=5)
+print(agent.run("对比 Python 与 Go 的适用场景并给出选型建议"))
+```
+
+规划器输出无法解析时自动退化为单步骤直接执行；规划步骤数超过 `max_steps`
+上限时自动截断。事件流新增 `PlanGeneratedEvent` / `PlanStepStartEvent` /
+`PlanStepEndEvent`，可经 `hooks` 回调观察规划与逐步执行过程。
+
+### 日志开关
+
+框架默认静默；调用 `enable_logging` 一键开启内部日志（ReAct 工具调用、长期记忆
+沉淀/检索、技能发现等），`disable_logging` 一键关闭：
+
+```python
+import logging
+
+from gearlink import disable_logging, enable_logging
+
+enable_logging()               # 开启：输出到 stderr，级别 INFO
+enable_logging(logging.DEBUG)  # 或指定更细级别
+disable_logging()              # 关闭：恢复静默
+```
+
+两个函数均幂等可重复调用；开启后框架日志统一经开关输出，不再向应用根日志器传播
+（避免与应用自行配置的 `basicConfig` 重复输出）。
+
 ## 公共 API
 
 所有公共名称均从顶层包 `gearlink` 显式导出（见 `gearlink/__init__.py` 的 `__all__`）：
 
 | 分类 | 导出名称 |
 |---|---|
-| Agent | `ReactAgent` |
+| Agent | `Agent`、`ReactAgent`、`PlanExecuteAgent` |
+| 事件 | `AgentEvent`、`StepStartEvent`、`TextDeltaEvent`、`ModelMessageEvent`、`ToolCallStartEvent`、`ToolCallEndEvent`、`FinalAnswerEvent`、`LoopAbortEvent`、`PlanGeneratedEvent`、`PlanStepStartEvent`、`PlanStepEndEvent`、`HookFn` |
 | 记忆 | `Memory`、`MemoryEntry`、`ShortTermMemory`、`LongTermMemory`、`MemoryManager` |
 | 工具 | `TOOL_REGISTRY`、`TOOL_SCHEMAS`、`register_tool`、`call_tool`、`set_skill_registry` |
 | 模型 | `ModelProvider`、`ModelResponse`、`StreamChunk`、`ToolCall`、`OpenAIProvider` |
 | 技能 | `Skill`、`SkillRegistry`、`SkillLoader` |
 | 异常 | `GearLinkError`、`ProviderError`、`ToolError`、`ToolNotFoundError`、`MemoryError`、`SkillError` 及其子类 |
+| 日志 | `enable_logging`、`disable_logging` |
 | 工具函数 | `estimate_tokens`、`count_message_tokens` |
 
 ## 示例
 
 - [examples/memory_chatbot.py](examples/memory_chatbot.py)：短期 + 长期记忆 + 会话摘要的对话助手；
 - [examples/streaming_demo.py](examples/streaming_demo.py)：`run_stream` 流式输出（含工具调用阶段）；
+- [examples/plan_execute_demo.py](examples/plan_execute_demo.py)：`PlanExecuteAgent` 规划-执行（含事件回调观察）；
 - [examples/skill_demo/](examples/skill_demo/)：技能目录结构示例（每个技能一个含 `SKILL.md` 的子目录）。
 
 ## 文档

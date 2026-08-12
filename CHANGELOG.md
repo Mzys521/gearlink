@@ -19,6 +19,10 @@
 - `OpenAIProvider`：OpenAI 兼容接口适配，密钥从环境变量 `DEEPSEEK_API_KEY` 读取；
 - 统一异常体系 `gearlink/exceptions.py`（`GearLinkError` 及其子类）；
 - 流式输出：`ModelProvider.chat_stream`（默认回退非流式）与 `ReactAgent.run_stream`，新增统一流式事件 `StreamChunk`；`OpenAIProvider` 支持真流式（工具调用增量按 index 累积）；
+- 事件流：`ReactAgent.run_events` 逐步产出 `AgentEvent` 体系事件（`StepStartEvent` / `ToolCallStartEvent` / `ToolCallEndEvent` / `FinalAnswerEvent` 等），`run` / `run_stream` 重构为事件流消费者；新增 `hooks` 构造参数与 `add_hook` 回调（on_step 语义）；
+- Agent 抽象：`Agent`（ABC）统一编排契约——`run_events` 为循环唯一实现（子类必须提供），`run` / `run_stream` / `add_hook` 由基类实现；`ReactAgent` 继承之并移除重复实现，公共接口不变；
+- `PlanExecuteAgent`：规划-执行策略（规划器分解步骤 → 内部 `ReactAgent` 执行器子循环 → 整合器汇总答案），支持 `max_steps` 截断与规划解析失败自动退化单步骤，新增 `PlanGeneratedEvent` / `PlanStepStartEvent` / `PlanStepEndEvent` 事件；
+- 全局日志开关：`enable_logging` / `disable_logging` 一键开关 `gearlink` 命名空间日志（输出到 stderr，级别可配置，幂等）；
 - 根目录 `examples/`（记忆对话示例与技能目录示例）；
 - `tests/` 基础测试套件（外部服务全部 mock）。
 
@@ -32,4 +36,5 @@
 - `tools/builtin.py` 移除冗余的 FastMCP 包装；依赖清单以显式 `pyyaml` 替代 `fastmcp`；
 - `skills/base.py` 规范化：现代类型语法、完整类型标注、Google 风格 docstring、标准日志器；
 - 公共 API 出口补齐：技能三件套、异常体系、`set_skill_registry` 与 token 工具函数均从顶层包 `gearlink` 显式导出（见 `__all__`）；
-- 移除 `core/agent.py` 的 `__main__` 演示入口，可运行示例统一收敛至根目录 `examples/`。
+- 移除 `core/agent.py` 的 `__main__` 演示入口，可运行示例统一收敛至根目录 `examples/`；
+- 去重重构：`core/memory.py` 三处 token 预算裁剪逻辑统一为 `_keep_within_budget` 辅助函数，检索去重合并为单次遍历；`core/agent.py` 事件产出样板代码统一为基类 `_emit_event`，`provider` / `_hooks` 初始化上提至 `Agent` 基类（`PlanExecuteAgent` 与执行器共享同一回调列表）；`exceptions.py` 移除冗余 `pass`。公共 API 行为不变。

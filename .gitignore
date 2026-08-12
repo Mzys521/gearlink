@@ -9,6 +9,10 @@ dist/
 venv/
 env/
 
+# ---- 测试覆盖率 ----
+.coverage
+htmlcov/
+
 # ---- 敏感信息（API key 等，切勿提交） ----
 .env
 # ---- 向量数据库本地数据 ----
