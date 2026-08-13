@@ -7,7 +7,41 @@
 
 ## [Unreleased]
 
-首个发布版本（0.1.0）整理中，包含以下内容。
+## [0.2.0] - 2026-08-13
+
+### Added
+
+- 架构治理（开发方向 §6.4）：
+  - `ToolRegistry` 类：工具注册表从进程级全局单例升级为可实例化组件，经 `ReactAgent(tool_registry=...)` 注入实现工具集/技能集隔离；模块级 `TOOL_REGISTRY` / `TOOL_SCHEMAS` / `register_tool` / `call_tool` / `set_skill_registry` 保留为默认实例兼容委托；
+  - `contextvars` 上下文解析：`ToolRegistry.call_tool` 执行期间经 `get_current_tool_registry()` 暴露当前注册表，`load_skill` 工具据此解析所属 Agent 的技能注册表，不再依赖全局状态；
+  - `ContextBuilder` 协议：统一记忆/上下文构建契约，`Memory` 基类新增 `build_context` 默认实现（返回 `get_messages()`），`ReactAgent._build_messages` 移除 `isinstance(MemoryManager)` 特判；
+  - `ReactAgent` / `PlanExecuteAgent` 新增 `tool_registry` 可选参数；`McpClient` 新增 `tool_registry` 可选参数。
+- 鲁棒性与确定性（开发方向 §6.5）：
+  - `OpenAIProvider` / `OllamaProvider` 新增 `timeout` 参数；OpenAI SDK 内置重试关闭（`max_retries=0`），重试由框架 `max_retries` 统一管理，避免双重重试；
+  - `PlanExecuteAgent._plan` / `Orchestrator._dispatch` 强制 `response_format={"type":"json_object"}`，新增 `_extract_json` 辅助函数从含 markdown 围栏或说明文字的文本中提取 JSON，加固解析容错。
+- 新增 `docs/接口文档.md`：逐一说明每个公共 API 的作用与用法。
+- 重写 `docs/架构设计.md`：对齐当前代码实现，补充 PlanExecuteAgent / Orchestrator 时序图与文字说明。
+
+### Changed
+
+- 文档重组：合并 `docs/接口设计规范.md` 到 `docs/开发规范.md`（统一为 13 节结构），删除已完成的 `docs/记忆升级方案.md`；更新全部交叉引用。
+
+### Fixed
+
+- 文档与代码一致性修正：
+  - `docs/接口设计规范.md` §2 抽象接口示例补齐 `response_format` 参数，与 `ModelProvider.chat` / `chat_stream` 实际签名对齐；§5 异常层次补全 `SkillError` 子树（`SkillNotFoundError` / `SkillLoadError` / `SkillValidationError` / `SkillExecutionError`），与 `gearlink/exceptions.py` 实际继承关系对齐；
+  - `docs/架构设计.md` §2 分层图、§3 类图、§3.1 组件表补全 `Orchestrator`（`core/orchestrator.py`，`Agent` 子类）；§7 目录结构由「目标态」改为「实际结构」并补 `tools/load_skill.py`；§9 异常层次补全 `SkillError` 子树；
+  - `docs/开发规范.md` §1 项目结构补全 `mcp/`、`core/` 子文件、根级文档（`CHANGELOG.md` / `CONTRIBUTING.md` / `TODO.md` / `.env.example`）与 `.github/`；§9 开源合规更新为现状；移除已全部完成的「附：待整改清单」（迁移至 `TODO.md`）；
+  - `docs/开发方向.md` 现状盘点更新（15 测试文件 / 201 用例 / `gearlink/core` 覆盖率 95.82%），P0~P2（M0/M1/M2）标记为已完成，仅保留 P3 为未来方向；
+  - `README.md` 公共 API 表「异常」行显式列出全部 `SkillError` 子类；文档索引补 `docs/开发方向.md` 链接；
+  - `examples/` 中 5 个自定义 `ModelProvider` 实现的 `chat()` 签名补齐 `response_format` 可选参数（接口设计规范 §2 严格合规，向后兼容）；
+  - `gearlink/providers/openai_provider.py` 恢复被误删的 `DEFAULT_BASE_URL` / `DEFAULT_MODEL` 模块常量（缺失会导致 `ruff check` F821 失败及 `OpenAIProvider()` 实例化时 `NameError`）。
+
+## [0.1.0] - 2026-08-12
+
+首个语义化版本（提交 `a809e21`）：在早期版本（见文末「早期提交」）基础上重构并补齐，
+形成多策略 Agent 编排（ReAct / 规划-执行 / 多 Agent 协作）+ 三可插拔维度
+（模型 / 记忆 / 工具）+ 技能扩展的完整框架。
 
 ### Added
 
@@ -52,3 +86,16 @@
 - 公共 API 出口补齐：技能三件套、异常体系、`set_skill_registry` 与 token 工具函数均从顶层包 `gearlink` 显式导出（见 `__all__`）；
 - 移除 `core/agent.py` 的 `__main__` 演示入口，可运行示例统一收敛至根目录 `examples/`；
 - 去重重构：`core/memory.py` 三处 token 预算裁剪逻辑统一为 `_keep_within_budget` 辅助函数，检索去重合并为单次遍历；`core/agent.py` 事件产出样板代码统一为基类 `_emit_event`，`provider` / `_hooks` 初始化上提至 `Agent` 基类（`PlanExecuteAgent` 与执行器共享同一回调列表）；`exceptions.py` 移除冗余 `pass`。公共 API 行为不变。
+
+## 早期提交（语义化版本采用前）
+
+以下提交未采用 Keep a Changelog 格式，仅按 git 历史补记（均为 0.1.0 的前身）：
+
+- `238c4a1`（v1.0.2，2026-08-12）：`core/agent.py` 与 `core/memory.py` 重构，清理 `exceptions.py` 冗余；
+- `385034a`（agent编排策略实现，2026-08-12）：编排策略落地（后续演进为 `PlanExecuteAgent`）；
+- `f6c36e6`（正式版 v1.0.1，2026-08-10）：README / CONTRIBUTING / CHANGELOG 初版，`examples/` 示例目录（memory_chatbot / streaming_demo / skill_demo），`core/agent.py` 大幅重构，异常体系与公共导出补齐；
+- `b9256b2` / `74438d4`（1.1 / demo 测试，2026-08-10）：demo 完善与测试；
+- `7075444`（skills v1.1，2026-08-08）：技能体系初版；
+- `2cd7e53` / `c248ad4` / `956c841`（上下文记忆 v1.2 / V1.1 / 记忆管理 v1，2026-08-08）：记忆体系初版与迭代；
+- `bb27ad6` / `98e7577`（规范化 / 开发协议规范，2026-08-08）：开发规范与接口设计规范文档；
+- `9c3f022`（最初ReAct循环，2026-08-08）：项目起点。

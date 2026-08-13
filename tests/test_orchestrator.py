@@ -21,7 +21,7 @@ class FakeProvider(ModelProvider):
         self.responses = responses
         self.calls = 0
 
-    def chat(self, messages, tools=None) -> ModelResponse:
+    def chat(self, messages, tools=None, response_format=None) -> ModelResponse:
         response = self.responses[self.calls]
         self.calls += 1
         return response
@@ -201,3 +201,32 @@ def test_parse_assignments_rejects_invalid():
     assert _parse_assignments("[]") is None
     assert _parse_assignments('[{"worker": "a"}]') is None  # 缺 task
     assert _parse_assignments('[{"worker": "", "task": "x"}]') is None  # worker 为空
+
+
+# ------------------- response_format 透传（开发方向 §6.5） -------------------
+
+
+def test_orchestrator_dispatch_uses_response_format():
+    """_dispatch 调用主管模型时传入 response_format={"type": "json_object"}。"""
+
+    class ResponseFormatCapturingProvider(ModelProvider):
+        def __init__(self, response):
+            self.response = response
+            self.received_response_format = []
+
+        def chat(self, messages, tools=None, response_format=None):
+            self.received_response_format.append(response_format)
+            return self.response
+
+    provider = ResponseFormatCapturingProvider(
+        ModelResponse(content='[{"worker": "a", "task": "子任务"}]')
+    )
+    worker_provider = FakeProvider([ModelResponse(content="结果")])
+    orchestrator = Orchestrator(
+        supervisor=ReactAgent(provider=provider),
+        workers={"a": ReactAgent(provider=worker_provider)},
+    )
+
+    orchestrator.run("任务")
+
+    assert provider.received_response_format[0] == {"type": "json_object"}

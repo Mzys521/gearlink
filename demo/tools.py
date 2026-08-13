@@ -1,6 +1,7 @@
-"""demo 项目自定义工具：与实现同源的 JSON Schema，经 register_tool 显式登记。
+"""demo 自定义工具：实现与 JSON Schema 同源定义，经 register_tool 显式登记。
 
 导入本模块即触发工具注册（副作用注册，与 gearlink.tools.builtin 同风格）。
+登记后，之后创建的 ReactAgent 每轮都会把这些工具的 schema 交给模型。
 """
 
 from gearlink import register_tool

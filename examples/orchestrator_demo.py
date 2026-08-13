@@ -35,6 +35,7 @@ class ScriptedProvider(ModelProvider):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse:
         response = self.responses[self.calls]
         self.calls += 1

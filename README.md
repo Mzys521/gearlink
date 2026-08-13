@@ -272,19 +272,20 @@ disable_logging()  # 关闭：恢复静默
 
 ## 公共 API
 
-所有公共名称均从顶层包 `gearlink` 显式导出（见 `gearlink/__init__.py` 的 `__all__`）：
+所有公共名称均从顶层包 `gearlink` 显式导出（见 `gearlink/__init__.py` 的 `__all__`）。
+各 API 的作用与用法详见 [接口文档](docs/接口文档.md)：
 
 | 分类 | 导出名称 |
 |---|---|
 | Agent | `Agent`、`ReactAgent`、`PlanExecuteAgent`、`Orchestrator` |
 | 事件 | `AgentEvent`、`StepStartEvent`、`TextDeltaEvent`、`ModelMessageEvent`、`ToolCallStartEvent`、`ToolCallEndEvent`、`FinalAnswerEvent`、`LoopAbortEvent`、`PlanGeneratedEvent`、`PlanStepStartEvent`、`PlanStepEndEvent`、`TeamPlanGeneratedEvent`、`AgentHandoffEvent`、`SubtaskEndEvent`、`HookFn` |
-| 记忆 | `Memory`、`MemoryEntry`、`Session`、`ShortTermMemory`、`LongTermMemory`、`MemoryManager`、`EmbeddingFn`、`ProfileHookFn`、`VectorStore`、`ChromaVectorStore` |
-| 工具 | `TOOL_REGISTRY`、`TOOL_SCHEMAS`、`register_tool`、`call_tool`、`build_tool_schema`、`set_skill_registry` |
+| 记忆 | `Memory`、`MemoryEntry`、`Session`、`ShortTermMemory`、`LongTermMemory`、`MemoryManager`、`EmbeddingFn`、`ProfileHookFn`、`VectorStore`、`ChromaVectorStore`、`ContextBuilder` |
+| 工具 | `TOOL_REGISTRY`、`TOOL_SCHEMAS`、`ToolRegistry`、`register_tool`、`call_tool`、`build_tool_schema`、`set_skill_registry` |
 | 模型 | `ModelProvider`、`ModelResponse`、`StreamChunk`、`ToolCall`、`OpenAIProvider`、`OllamaProvider`、`AnthropicProvider` |
 | MCP | `McpClient` |
 | 技能 | `Skill`、`SkillRegistry`、`SkillLoader` |
 | 可观测性 | `TokenUsage`、`UsageTracker`、`UsageRecord`、`JsonlEventSink`、`jsonl_hook`、`load_jsonl_events` |
-| 异常 | `GearLinkError`、`ProviderError`、`ToolError`、`ToolNotFoundError`、`MemoryError`、`SkillError` 及其子类 |
+| 异常 | `GearLinkError`、`ProviderError`、`ToolError`、`ToolNotFoundError`、`MemoryError`、`SkillError`、`SkillNotFoundError`、`SkillLoadError`、`SkillValidationError`、`SkillExecutionError` |
 | 日志 | `enable_logging`、`disable_logging` |
 | 工具函数 | `estimate_tokens`、`count_message_tokens` |
 
@@ -312,8 +313,9 @@ disable_logging()  # 关闭：恢复静默
 
 - [使用教程](docs/使用教程.md)：从安装到进阶的完整新手教程
 - [架构设计](docs/架构设计.md)：分层架构、核心组件、运行时数据流与四类扩展点契约
-- [接口设计规范](docs/接口设计规范.md)：公共 API 设计原则
-- [开发规范](docs/开发规范.md)：开发流程与代码规范
+- [接口文档](docs/接口文档.md)：每个公共 API 的作用与用法说明
+- [开发规范](docs/开发规范.md)：开发流程、代码规范与 API 设计原则
+- [开发方向](docs/开发方向.md)：分优先级（P0~P3）的路线图与里程碑
 
 ## 开发
 

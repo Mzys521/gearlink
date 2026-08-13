@@ -15,7 +15,7 @@ import concurrent.futures
 from collections.abc import Awaitable
 from typing import Any
 
-from gearlink.core.tool import TOOL_REGISTRY, TOOL_SCHEMAS, register_tool
+from gearlink.core.tool import ToolRegistry, register_tool
 from gearlink.exceptions import ToolError
 
 #: 远端工具登记进本地注册表时的命名空间前缀格式
@@ -58,7 +58,9 @@ class McpClient:
                 client.unregister_tools()
     """
 
-    def __init__(self, server_name: str, session: Any) -> None:
+    def __init__(
+        self, server_name: str, session: Any, tool_registry: ToolRegistry | None = None
+    ) -> None:
         """初始化 MCP 工具客户端。
 
         Args:
@@ -66,9 +68,13 @@ class McpClient:
                 用于拼接本地工具名 ``mcp_<server>_<tool>``。
             session: 已建立并完成 initialize 的 MCP ClientSession（异步对象），
                 须提供 ``list_tools()`` 与 ``call_tool(name, arguments)`` 协程方法。
+            tool_registry: 工具注册表实例（开发方向 §6.4）；None 时登记进模块级
+                默认注册表（向后兼容）。注入后 MCP 工具登记进指定注册表，
+                可与 ``ReactAgent(tool_registry=...)`` 配合实现工具隔离。
         """
         self.server_name = server_name
         self.session = session
+        self._tool_registry = tool_registry
         self._registered: list[str] = []
 
     def register_tools(self) -> list[str]:
@@ -89,15 +95,26 @@ class McpClient:
         names: list[str] = []
         for tool in listing.tools:
             local_name = _TOOL_NAME_TEMPLATE.format(server=self.server_name, tool=tool.name)
-            register_tool(
-                local_name,
-                self._make_invoker(tool.name),
-                {
-                    "description": getattr(tool, "description", "") or f"MCP 工具 {tool.name}",
-                    "parameters": getattr(tool, "inputSchema", None)
-                    or {"type": "object", "properties": {}},
-                },
-            )
+            if self._tool_registry is not None:
+                self._tool_registry.register_tool(
+                    local_name,
+                    self._make_invoker(tool.name),
+                    {
+                        "description": getattr(tool, "description", "") or f"MCP 工具 {tool.name}",
+                        "parameters": getattr(tool, "inputSchema", None)
+                        or {"type": "object", "properties": {}},
+                    },
+                )
+            else:
+                register_tool(
+                    local_name,
+                    self._make_invoker(tool.name),
+                    {
+                        "description": getattr(tool, "description", "") or f"MCP 工具 {tool.name}",
+                        "parameters": getattr(tool, "inputSchema", None)
+                        or {"type": "object", "properties": {}},
+                    },
+                )
             names.append(local_name)
         self._registered.extend(names)
         return names
@@ -105,12 +122,18 @@ class McpClient:
     def unregister_tools(self) -> None:
         """注销本客户端登记的全部工具（幂等）。"""
         for name in self._registered:
-            TOOL_REGISTRY.pop(name, None)
-            index = next(
-                (i for i, s in enumerate(TOOL_SCHEMAS) if s["function"]["name"] == name), None
-            )
-            if index is not None:
-                del TOOL_SCHEMAS[index]
+            if self._tool_registry is not None:
+                self._tool_registry.unregister_tool(name)
+            else:
+                # 回退到模块级默认注册表（向后兼容）
+                from gearlink.core.tool import TOOL_REGISTRY, TOOL_SCHEMAS
+
+                TOOL_REGISTRY.pop(name, None)
+                index = next(
+                    (i for i, s in enumerate(TOOL_SCHEMAS) if s["function"]["name"] == name), None
+                )
+                if index is not None:
+                    del TOOL_SCHEMAS[index]
         self._registered = []
 
     def _make_invoker(self, remote_name: str):

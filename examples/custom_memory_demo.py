@@ -43,6 +43,7 @@ class EchoProvider(ModelProvider):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse:
         last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         return ModelResponse(content=f"[Echo] {last_user}")

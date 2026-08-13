@@ -84,10 +84,14 @@ def test_enable_logging_sets_effective_level():
 def test_enable_logging_is_idempotent():
     """重复开启不应重复添加 handler"""
     enable_logging()
+    # 记录首次开启后的 handler 数量（pytest 9.x 会向 propagate=False 的
+    # logger 注入 LogCaptureHandler，故不能断言绝对值 1）
+    n = len(_root_logger().handlers)
     enable_logging()
     enable_logging()
 
-    assert len(_root_logger().handlers) == 1
+    # 重复调用不应新增任何 handler
+    assert len(_root_logger().handlers) == n
 
 
 def test_exports_from_top_level():

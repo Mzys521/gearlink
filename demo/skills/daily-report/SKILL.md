@@ -2,7 +2,7 @@
 name: daily-report
 description: 生成一份包含当前时间与指定城市天气的每日简报，适合早晨问候或行程速览场景
 author: gearlink-demo
-version: 1.0
+version: "1.0"
 ---
 
 # 每日简报技能指令

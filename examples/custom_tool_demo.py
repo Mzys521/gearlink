@@ -24,7 +24,7 @@ def multiply(a: float, b: float) -> float:
 
 
 def main() -> None:
-    # 1. 注册自定义工具：schema 与函数签名同源定义（接口设计规范 §4）
+    # 1. 注册自定义工具：schema 与函数签名同源定义（开发规范 §6）
     register_tool(
         "multiply",
         multiply,
