@@ -1,6 +1,6 @@
 """ShortTermMemory 测试：正常路径与边界场景。"""
 
-from gearlink.core.memory import ShortTermMemory
+from gearlink.core.memory import ContextBuilder, MemoryManager, ShortTermMemory
 
 
 def test_short_term_memory_add_and_get_messages():
@@ -68,3 +68,24 @@ def test_short_term_memory_removes_oldest_first_by_tokens():
     messages = memory.get_messages()
     assert len(messages) == 1
     assert messages[0]["content"] == "你好"
+
+
+# ---------- build_context 默认实现与 ContextBuilder 协议（§6.4） ----------
+
+
+def test_memory_build_context_default():
+    """ShortTermMemory.build_context() 默认实现返回与 get_messages() 相同的列表。"""
+    memory = ShortTermMemory(max_message=20)
+    memory.add_message({"role": "user", "content": "你好"})
+    memory.add_message({"role": "assistant", "content": "你好！"})
+
+    assert memory.build_context() == memory.get_messages()
+
+
+def test_context_builder_protocol():
+    """Memory 和 MemoryManager 实例满足 ContextBuilder 协议（isinstance 检查）。"""
+    memory = ShortTermMemory(max_message=20)
+    manager = MemoryManager(short_term=ShortTermMemory(max_message=20))
+
+    assert isinstance(memory, ContextBuilder)
+    assert isinstance(manager, ContextBuilder)

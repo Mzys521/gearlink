@@ -13,7 +13,6 @@ TextDeltaEvent）。
 Orchestrator 是多角色分工（可并行），二者互补。
 """
 
-import json
 import logging
 import queue
 import threading
@@ -21,7 +20,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from gearlink.core.agent import Agent
+from gearlink.core.agent import Agent, _extract_json
 from gearlink.core.events import (
     AgentEvent,
     AgentHandoffEvent,
@@ -62,8 +61,8 @@ _SYNTHESIZER_SYSTEM_PROMPT = (
 def _parse_assignments(text: str) -> list[dict[str, str]] | None:
     """解析主管输出的分派清单（JSON 对象数组）。
 
-    容错：剥离可能的 markdown 代码围栏后按 JSON 解析；每个元素须为含
-    ``worker`` / ``task`` 字符串键的对象。
+    容错：经 `_extract_json` 剥离围栏与提取 JSON 片段后解析；
+    每个元素须为含 ``worker`` / ``task`` 字符串键的对象。
 
     Args:
         text: 主管原始输出文本。
@@ -71,15 +70,8 @@ def _parse_assignments(text: str) -> list[dict[str, str]] | None:
     Returns:
         解析出的分派列表；格式非法时返回 None（由调用方退化为全员兜底分派）。
     """
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        lines = lines[1:] if lines and lines[0].startswith("```") else lines
-        lines = lines[:-1] if lines and lines[-1].strip() == "```" else lines
-        cleaned = "\n".join(lines).strip()
-    try:
-        assignments = json.loads(cleaned)
-    except json.JSONDecodeError:
+    assignments = _extract_json(text)
+    if assignments is None:
         return None
     if not isinstance(assignments, list) or not assignments:
         return None
@@ -249,7 +241,8 @@ class Orchestrator(Agent):
             messages=[
                 {"role": "system", "content": _DISPATCHER_SYSTEM_PROMPT},
                 {"role": "user", "content": f"工人名单：\n{roster}\n\n用户任务：{user_input}"},
-            ]
+            ],
+            response_format={"type": "json_object"},
         )
         assignments = _parse_assignments(response.content or "")
         if assignments is None:

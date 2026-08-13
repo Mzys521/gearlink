@@ -29,6 +29,7 @@ class ScriptedProvider(ModelProvider):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse:
         if any(m.get("role") == "tool" for m in messages):
             return ModelResponse(content="已为你查询到当前时间（来自 get_current_time 工具）。")

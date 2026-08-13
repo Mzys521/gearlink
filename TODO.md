@@ -71,3 +71,32 @@
 - [x] 创建 `CHANGELOG.md`（Keep a Changelog 格式）
 - [x] 提供 `.env.example` 示例环境变量文件
 - [ ] 发布前用 `gitleaks` 审查历史提交，确认无泄露密钥（CI 已接入 gitleaks 扫描 job；旧提交中曾硬编码 API key，发布前须轮换该密钥，必要时重写历史）
+
+## 待办（架构债务与 DX 优化，本次审查新增）
+
+> 依据 `docs/开发方向.md` §1.3 与 §6.4–6.7 整理，均为 P3 未排期方向，按优先级排列。
+> 遵循「纯新增、默认值等价现状、公共 API 只增不改」原则，落地后同步更新 `CHANGELOG.md` 与 `docs/开发方向.md`。
+
+### 架构治理与依赖注入（§6.4）
+
+- [x] 工具/技能注册表去全局单例：`TOOL_REGISTRY` / `TOOL_SCHEMAS` / `_skill_registry` 改为可实例化的 `ToolRegistry` 注入 `ReactAgent`（保留模块级默认实例兼容），`load_skill` 经 `contextvars` 上下文解析，消除 `register_tool` 无锁写全局
+- [x] 统一记忆/上下文契约：抽象 `ContextBuilder` 协议，`Memory` 基类新增 `build_context` 默认实现，移除 `ReactAgent._build_messages` 的 `isinstance(MemoryManager)` 特判
+
+### 鲁棒性与确定性（§6.5）
+
+- [x] Provider 超时：`OpenAIProvider` / `OllamaProvider` 增加 `timeout`，关闭 OpenAI SDK 默认重试（`max_retries=0`）避免双重重试
+- [x] 结构化输出强制 + JSON 加固：规划/分派传 `response_format={"type":"json_object"}`，`_extract_json` 辅助函数从含围栏或说明文字的文本中提取 JSON
+- [ ] token 计数可注入：定义 `TokenCounter` 协议（默认启发式，可选 tiktoken），修正工具结果按 `MAX_TOOL_RESULT_TOKENS * 4` 字符反推的截断误差
+- [ ] `build_tool_schema` 完善：`Optional[X]` 生成 nullable、支持参数级描述（`typing.Annotated` 或描述字典），消除 `_nullable` 死代码
+
+### 可观测性与异常深化（§6.6）
+
+- [ ] `ProviderError` 子类化：派生限流/鉴权/服务端子类（向后兼容 `retryable`）
+- [ ] 事件 trace 结构：`AgentEvent` 增加 `trace_id` / `parent_seq`，`Orchestrator` / `PlanExecuteAgent` 转发时保留父子关系；远期 OTLP 导出
+- [ ] 版本与类型治理：提供 `__version__`、`py.typed`、mypy/pyright CI 门禁
+
+### 异步、并发与开发者体验（§6.7）
+
+- [ ] 异步 API：`arun` / `arun_stream` / `arun_events` + `ModelProvider.chat_async`，`Orchestrator` / `parallel_tool_calls` asyncio 变体 + 取消令牌
+- [ ] 统一配置对象 `GearLinkConfig` 集中管理 env 读取，去除 Provider 内硬编码 DeepSeek 语义泄漏
+- [ ] 声明式装配：YAML/JSON 描述 agent 团队 + `Agent.from_config(...)`，配合 CLI 降低多 Agent 编排门槛

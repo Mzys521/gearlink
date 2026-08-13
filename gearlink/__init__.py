@@ -1,6 +1,6 @@
 """GearLink：轻量级 Agent 框架。
 
-只有从此处显式导出的名称才是公共 API（接口设计规范 §1.5，架构设计 §2）：
+只有从此处显式导出的名称才是公共 API（开发规范 §5.1，架构设计 §2）：
 
 - Agent：`Agent`（编排策略抽象）/ `ReactAgent`（ReAct）/ `PlanExecuteAgent`（规划-执行）/
   `Orchestrator`（多 Agent 协作主管-工人编排）；
@@ -12,7 +12,7 @@
   `OpenAIProvider` / `OllamaProvider` / `AnthropicProvider`；
 - 技能：`Skill` / `SkillRegistry` / `SkillLoader`；
 - MCP：`McpClient`（外部 MCP 服务器工具接入，另见 `gearlink.mcp`）；
-- 异常：`GearLinkError` 体系（接口设计规范 §5）；
+- 异常：`GearLinkError` 体系（开发规范 §7）；
 - 日志：`enable_logging` / `disable_logging`（全局日志开关）；
 - 可观测性：`TokenUsage` / `UsageTracker`（用量统计）/ `JsonlEventSink` / `jsonl_hook` /
   `load_jsonl_events`（事件落盘与回放）；
@@ -43,6 +43,7 @@ from gearlink.core.events import (
 from gearlink.core.orchestrator import Orchestrator
 from gearlink.core.memory import (
     ChromaVectorStore,
+    ContextBuilder,
     EmbeddingFn,
     LongTermMemory,
     Memory,
@@ -56,6 +57,7 @@ from gearlink.core.memory import (
 from gearlink.core.tool import (
     TOOL_REGISTRY,
     TOOL_SCHEMAS,
+    ToolRegistry,
     build_tool_schema,
     call_tool,
     register_tool,
@@ -125,6 +127,8 @@ __all__ = [
     "ProfileHookFn",
     "VectorStore",
     "ChromaVectorStore",
+    "ContextBuilder",
+    "ToolRegistry",
     "TOOL_REGISTRY",
     "TOOL_SCHEMAS",
     "call_tool",

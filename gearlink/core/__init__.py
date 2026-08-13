@@ -7,6 +7,7 @@ from gearlink.core.agent import MAX_ITERATIONS, MAX_TOOL_RESULT_TOKENS, SYSTEM_P
 from gearlink.core.events import AgentHandoffEvent, SubtaskEndEvent, TeamPlanGeneratedEvent
 from gearlink.core.memory import (
     ChromaVectorStore,
+    ContextBuilder,
     LongTermMemory,
     Memory,
     MemoryEntry,
@@ -20,6 +21,7 @@ from gearlink.core.orchestrator import Orchestrator
 from gearlink.core.tool import (
     TOOL_REGISTRY,
     TOOL_SCHEMAS,
+    ToolRegistry,
     call_tool,
     register_tool,
     set_skill_registry,
@@ -39,10 +41,12 @@ __all__ = [
     "LongTermMemory",
     "VectorStore",
     "ChromaVectorStore",
+    "ContextBuilder",
     "Orchestrator",
     "AgentHandoffEvent",
     "SubtaskEndEvent",
     "TeamPlanGeneratedEvent",
+    "ToolRegistry",
     "TOOL_REGISTRY",
     "TOOL_SCHEMAS",
     "call_tool",

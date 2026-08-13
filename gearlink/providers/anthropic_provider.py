@@ -172,7 +172,7 @@ class AnthropicProvider(ModelProvider):
             messages: OpenAI 消息格式的对话历史。
             tools: 可用工具的 schema 列表（OpenAI 格式）；None 表示不启用工具调用。
             response_format: 结构化输出格式；Anthropic Messages API 无对应的
-                原生参数，本提供者忽略该参数（接口设计规范允许的可选忽略）。
+                原生参数，本提供者忽略该参数（开发规范 §5.2 允许的可选忽略）。
 
         Returns:
             ModelResponse: 统一响应结构，含文本内容与工具调用请求。

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gearlink"
-version = "0.1.0"
+version = "0.2.0"
 description = "轻量级 Agent 框架：ReAct 循环、可插拔模型提供者与工具注册表"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -5,8 +5,10 @@ import pytest
 from gearlink.core.tool import (
     TOOL_REGISTRY,
     TOOL_SCHEMAS,
+    ToolRegistry,
     build_tool_schema,
     call_tool,
+    get_current_tool_registry,
     register_tool,
 )
 from gearlink.exceptions import ToolError, ToolNotFoundError
@@ -147,3 +149,145 @@ def test_build_tool_schema_raises_on_varargs():
 
     with pytest.raises(ToolError, match="无法自动生成"):
         build_tool_schema(bad)
+
+
+# ------------------- ToolRegistry 实例化与隔离（开发方向 §6.4） -------------------
+
+
+def test_tool_registry_instance_isolation():
+    """两个 ToolRegistry 实例的注册表相互隔离：在一个实例注册的工具不出现在另一个。"""
+    registry_a = ToolRegistry()
+    registry_b = ToolRegistry()
+
+    def echo() -> str:
+        return "ok"
+
+    registry_a.register_tool(
+        "iso_echo",
+        echo,
+        {
+            "description": "隔离测试工具",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    )
+
+    assert "iso_echo" in registry_a.registry
+    assert "iso_echo" not in registry_b.registry
+    assert any(s["function"]["name"] == "iso_echo" for s in registry_a.schemas)
+    assert not any(s["function"]["name"] == "iso_echo" for s in registry_b.schemas)
+
+
+def test_tool_registry_register_and_call():
+    """在实例上注册工具并调用，验证返回结果。"""
+    registry = ToolRegistry()
+
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    registry.register_tool(
+        "iso_add",
+        add,
+        {
+            "description": "加法",
+            "parameters": {
+                "type": "object",
+                "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                "required": ["a", "b"],
+            },
+        },
+    )
+
+    assert registry.call_tool("iso_add", {"a": 2, "b": 3}) == 5
+
+
+def test_tool_registry_call_tool_sets_context():
+    """call_tool 执行期间 get_current_tool_registry() 返回当前注册表实例。"""
+    registry = ToolRegistry()
+    captured = []
+
+    def capture_registry() -> str:
+        captured.append(get_current_tool_registry())
+        return "ok"
+
+    registry.register_tool(
+        "iso_capture",
+        capture_registry,
+        {
+            "description": "捕获当前注册表",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    )
+
+    registry.call_tool("iso_capture", {})
+
+    assert captured == [registry]
+
+
+def test_tool_registry_get_schemas_with_whitelist():
+    """get_schemas 按白名单过滤：注册 2 个工具，白名单仅保留 1 个。"""
+    registry = ToolRegistry()
+    schema = {
+        "description": "测试",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+    registry.register_tool("iso_alpha", lambda: "a", schema)
+    registry.register_tool("iso_beta", lambda: "b", schema)
+
+    filtered = registry.get_schemas(["iso_alpha"])
+    assert len(filtered) == 1
+    assert filtered[0]["function"]["name"] == "iso_alpha"
+
+
+def test_tool_registry_unregister_tool():
+    """unregister_tool 从注册表和 schema 列表中同时移除工具。"""
+    registry = ToolRegistry()
+
+    def dummy() -> str:
+        return "ok"
+
+    registry.register_tool(
+        "iso_dummy",
+        dummy,
+        {
+            "description": "临时工具",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    )
+
+    assert "iso_dummy" in registry.registry
+    assert any(s["function"]["name"] == "iso_dummy" for s in registry.schemas)
+
+    registry.unregister_tool("iso_dummy")
+
+    assert "iso_dummy" not in registry.registry
+    assert not any(s["function"]["name"] == "iso_dummy" for s in registry.schemas)
+
+
+def test_tool_registry_duplicate_name_raises():
+    """同一实例上重复注册同名工具时抛出 ToolError。"""
+    registry = ToolRegistry()
+
+    def dummy() -> str:
+        return "ok"
+
+    schema = {
+        "description": "重复名",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+    registry.register_tool("iso_dup", dummy, schema)
+
+    with pytest.raises(ToolError):
+        registry.register_tool("iso_dup", dummy, schema)
+
+
+def test_tool_registry_skill_registry():
+    """set_skill_registry 注入的技能注册表可通过 skill_registry 属性读取。"""
+    from gearlink.skills import SkillRegistry
+
+    registry = ToolRegistry()
+    assert registry.skill_registry is None
+
+    skills = SkillRegistry()
+    registry.set_skill_registry(skills)
+
+    assert registry.skill_registry is skills

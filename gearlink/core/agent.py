@@ -38,7 +38,7 @@ from gearlink.core.events import (
     ToolCallStartEvent,
 )
 from gearlink.core.memory import Memory, MemoryManager, ShortTermMemory
-from gearlink.core.tool import TOOL_SCHEMAS, call_tool, set_skill_registry
+from gearlink.core.tool import ToolRegistry, _default_registry, set_skill_registry
 from gearlink.exceptions import GearLinkError, ProviderError
 from gearlink.providers.base import ModelProvider, ModelResponse, ToolCall
 from gearlink.skills import SkillRegistry
@@ -245,6 +245,7 @@ class ReactAgent(Agent):
         max_retries: int = 0,
         tools: list[str] | None = None,
         parallel_tool_calls: bool = False,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         """初始化 Agent。
 
@@ -270,15 +271,23 @@ class ReactAgent(Agent):
             parallel_tool_calls: 同一轮多个工具调用是否并行执行；False 表示串行
                 （现状）。开启时用线程池并行，事件产出顺序与结果写回记忆的
                 顺序保持不变（仅要求工具自身线程安全）。
+            tool_registry: 工具注册表实例（开发方向 §6.4）；None 时使用模块级
+                默认注册表（向后兼容）。注入后 Agent 持有隔离的工具集与技能集，
+                同一进程内多个 Agent 互不干扰。
         """
         super().__init__(provider=provider, hooks=hooks)
         self.retrieve_every_iteration = retrieve_every_iteration
         self.max_retries = max_retries
         self.tools = tools
         self.parallel_tool_calls = parallel_tool_calls
+        self._tool_registry = tool_registry or _default_registry
         if skill_registry is not None:
-            # 供 load_skill 工具按名解析技能（core/tool.py 全局注入点）
-            set_skill_registry(skill_registry)
+            # 登记到本 Agent 的工具注册表（实例化路径），供 load_skill 工具解析
+            self._tool_registry.set_skill_registry(skill_registry)
+            # 同时登记到模块级默认注册表（向后兼容：未注入 tool_registry 时
+            # load_skill 回退到全局 _skill_registry）
+            if tool_registry is None:
+                set_skill_registry(skill_registry)
         if memory is None:
             memory = ShortTermMemory(max_message=20)
             memory.add_message({"role": "system", "content": _build_system_prompt(skill_registry)})
@@ -287,26 +296,24 @@ class ReactAgent(Agent):
     def _build_messages(self, query: str | None = None) -> list[dict[str, Any]]:
         """基于记忆组装本轮请求消息。
 
+        统一走 `build_context`（开发方向 §6.4）：`Memory` 基类默认返回 `get_messages()`，
+        `MemoryManager` 覆写为检索注入 + 预算裁剪，不再对 `MemoryManager` 做 `isinstance` 特判。
+
         Args:
-            query: 语义检索查询；仅对 MemoryManager 生效，用于注入长期记忆相关历史。
+            query: 语义检索查询；仅对支持检索注入的记忆生效。
 
         Returns:
             OpenAI 消息格式的请求消息列表。
         """
-        if isinstance(self.memory, MemoryManager):
-            return self.memory.build_context(query or "")
-        return self.memory.get_messages()
+        return self.memory.build_context(query or "")
 
     def _available_tool_schemas(self) -> list[dict[str, Any]]:
         """返回本轮可用的工具 schema（按白名单过滤，开发方向 §4.4）。
 
         Returns:
-            全量 TOOL_SCHEMAS；配置了 tools 白名单时仅返回名单内的条目。
+            本 Agent 工具注册表中的全部 schema；配置了 tools 白名单时仅返回名单内的条目。
         """
-        if self.tools is None:
-            return TOOL_SCHEMAS
-        allowed = set(self.tools)
-        return [schema for schema in TOOL_SCHEMAS if schema["function"]["name"] in allowed]
+        return self._tool_registry.get_schemas(self.tools)
 
     def run_events(self, user_input: str, *, stream: bool = False) -> Iterator[AgentEvent]:
         """执行一次用户请求，逐步产出 ReAct 循环的事件（循环的唯一实现）。
@@ -547,9 +554,9 @@ class ReactAgent(Agent):
         except json.JSONDecodeError:
             arguments = {}
 
-        # 执行工具（call_tool 会从 TOOL_REGISTRY 中查找并调用）
+        # 执行工具（经本 Agent 的工具注册表调度，含 contextvars 上下文设置）
         try:
-            result = call_tool(tool_call.name, arguments)
+            result = self._tool_registry.call_tool(tool_call.name, arguments)
             # 将结果转为 JSON 字符串，以便统一存储
             result_text = json.dumps(result, ensure_ascii=False)
             # 超出预算时按 4 字符/token 的启发式反推字符上限截断
@@ -595,10 +602,47 @@ _SYNTHESIZER_SYSTEM_PROMPT = (
 )
 
 
+def _extract_json(text: str) -> Any | None:
+    """从可能包含 markdown 围栏或说明文字的文本中提取 JSON（开发方向 §6.5）。
+
+    解析顺序：
+    1. 剥离 markdown 代码围栏后直接 `json.loads`；
+    2. 从文本中提取最外层 ``[...]`` 或 ``{...}`` 片段后解析。
+
+    Args:
+        text: 模型原始输出文本。
+
+    Returns:
+        解析后的 Python 对象；无法解析时返回 None。
+    """
+    cleaned = text.strip()
+    # 1. 剥离 markdown 代码围栏
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        lines = lines[1:] if lines and lines[0].startswith("```") else lines
+        lines = lines[:-1] if lines and lines[-1].strip() == "```" else lines
+        cleaned = "\n".join(lines).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    # 2. 提取最外层 [ ] 或 { } 片段
+    for open_char, close_char in (("[", "]"), ("{", "}")):
+        start = cleaned.find(open_char)
+        end = cleaned.rfind(close_char)
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(cleaned[start : end + 1])
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
 def _parse_steps(text: str) -> list[str] | None:
     """解析规划器输出的步骤列表（JSON 字符串数组）。
 
-    容错：剥离可能的 markdown 代码围栏后按 JSON 解析；结果须为非空字符串列表。
+    容错：经 `_extract_json` 剥离围栏与提取 JSON 片段后解析；
+    结果须为非空字符串列表。
 
     Args:
         text: 规划器原始输出文本。
@@ -606,15 +650,8 @@ def _parse_steps(text: str) -> list[str] | None:
     Returns:
         解析出的步骤列表；格式非法时返回 None（由调用方退化为单步骤执行）。
     """
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        lines = lines[1:] if lines and lines[0].startswith("```") else lines
-        lines = lines[:-1] if lines and lines[-1].strip() == "```" else lines
-        cleaned = "\n".join(lines).strip()
-    try:
-        steps = json.loads(cleaned)
-    except json.JSONDecodeError:
+    steps = _extract_json(text)
+    if steps is None:
         return None
     if not isinstance(steps, list) or not steps:
         return None
@@ -645,6 +682,7 @@ class PlanExecuteAgent(Agent):
         skill_registry: SkillRegistry | None = None,
         max_steps: int = 5,
         hooks: list[HookFn] | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         """初始化规划-执行 Agent。
 
@@ -658,6 +696,8 @@ class PlanExecuteAgent(Agent):
                 并透传给内部执行器。
             max_steps: 规划步骤数量上限，规划结果超出时截断。默认 5。
             hooks: 事件回调列表（on_step 语义）；同时作用于本 Agent 与内部执行器。
+            tool_registry: 工具注册表实例（开发方向 §6.4）；None 时使用模块级
+                默认注册表（向后兼容）。透传给内部执行器。
         """
         super().__init__(provider=provider, hooks=hooks)
         self.max_steps = max_steps
@@ -667,6 +707,7 @@ class PlanExecuteAgent(Agent):
             memory=memory,
             retrieve_every_iteration=retrieve_every_iteration,
             skill_registry=skill_registry,
+            tool_registry=tool_registry,
         )
         # 与执行器共享同一回调列表：基类 add_hook 对二者事件流同时生效
         self.executor._hooks = self._hooks
@@ -739,7 +780,8 @@ class PlanExecuteAgent(Agent):
             messages=[
                 {"role": "system", "content": _PLANNER_SYSTEM_PROMPT},
                 {"role": "user", "content": user_input},
-            ]
+            ],
+            response_format={"type": "json_object"},
         )
         steps = _parse_steps(response.content or "")
         if not steps:

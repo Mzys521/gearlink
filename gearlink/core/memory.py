@@ -87,6 +87,27 @@ _MMR_MIN_CANDIDATES = 10
 
 
 @runtime_checkable
+class ContextBuilder(Protocol):
+    """上下文构建器协议：支持按查询组装请求消息的记忆/组合器实现（开发方向 §6.4）。
+
+    `Memory` 基类已提供默认 `build_context` 实现（返回 `get_messages()`），
+    `MemoryManager` 覆写为检索注入 + 预算裁剪。第三方记忆可自行实现本协议
+    以提供检索注入能力，`ReactAgent` 不再对 `MemoryManager` 做 `isinstance` 特判。
+    """
+
+    def build_context(self, query: str = "") -> list[dict[str, Any]]:
+        """组装本轮请求消息列表。
+
+        Args:
+            query: 语义检索查询文本（通常为本轮用户输入）；空字符串表示不检索。
+
+        Returns:
+            可直接传给 ModelProvider.chat 的消息列表。
+        """
+        ...
+
+
+@runtime_checkable
 class VectorStore(Protocol):
     """向量存储协议：长期记忆的存储后端抽象（开发方向 §5.2）。
 
@@ -143,10 +164,18 @@ class ChromaVectorStore:
     def get(
         self, include: list[str] | None = None, where: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """读取记录，透传 chromadb get 结果。"""
-        if where is None:
-            return self._collection.get(include=include)
-        return self._collection.get(include=include, where=where)
+        """读取记录，透传 chromadb get 结果。
+
+        ``include`` 为 None 时不传该参数（使用 chromadb 默认包含 metadatas/documents），
+        避免 chromadb 校验 ``include`` 必须为列表而拒绝 None（与 :class:`VectorStore`
+        协议「include 为 None 时相应字段可省略」一致）。
+        """
+        kwargs: dict[str, Any] = {}
+        if include is not None:
+            kwargs["include"] = include
+        if where is not None:
+            kwargs["where"] = where
+        return self._collection.get(**kwargs)
 
     def query(self, query_text: str, n_results: int) -> dict[str, list[Any]]:
         """检索并把 chromadb 的嵌套列表结果扁平化为单列表。"""
@@ -217,7 +246,11 @@ def _keep_within_budget(
 
 
 class Memory(ABC):
-    """记忆抽象接口：屏蔽短期/长期记忆的存储细节"""
+    """记忆抽象接口：屏蔽短期/长期记忆的存储细节。
+
+    子类默认继承 `build_context` 的默认实现（返回 `get_messages()` 全量），
+    需要检索注入的子类或组合器（如 `MemoryManager`）可自行覆写。
+    """
 
     @abstractmethod
     def add_message(self, message: dict[str, Any]) -> None:
@@ -226,6 +259,19 @@ class Memory(ABC):
         Args:
             message: OpenAI 消息格式字典，须包含 role 字段。
         """
+
+    def build_context(self, query: str = "") -> list[dict[str, Any]]:
+        """组装本轮请求消息列表（默认实现：返回全部消息，无检索注入）。
+
+        子类可覆写以提供语义检索注入等能力（如 `MemoryManager`）。
+
+        Args:
+            query: 语义检索查询文本；默认实现忽略此参数。
+
+        Returns:
+            按时间顺序排列的消息列表。
+        """
+        return self.get_messages()
 
     @abstractmethod
     def get_messages(self, limit: int | None = None) -> list[dict[str, Any]]:

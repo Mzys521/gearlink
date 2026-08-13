@@ -26,7 +26,12 @@ class OllamaProvider(OpenAIProvider):
         ollama serve
     """
 
-    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
         """初始化 Ollama 提供者。
 
         各参数未传入时回退到环境变量，再到内置默认值：
@@ -35,6 +40,7 @@ class OllamaProvider(OpenAIProvider):
         Args:
             model: Ollama 中已拉取的模型名称，默认 ``qwen2.5:7b``。
             base_url: Ollama 服务地址，默认指向本机 ``http://localhost:11434/v1``。
+            timeout: 请求超时秒数（开发方向 §6.5）；None 时使用 SDK 默认值。
         """
         # Ollama 不校验密钥，传入占位值即可；显式指定 model/base_url，
         # 避免落入父类的 DEEPSEEK_* 环境变量回退路径
@@ -42,4 +48,5 @@ class OllamaProvider(OpenAIProvider):
             model=model or os.environ.get("OLLAMA_MODEL") or DEFAULT_MODEL,
             api_key="ollama",
             base_url=base_url or os.environ.get("OLLAMA_BASE_URL") or DEFAULT_BASE_URL,
+            timeout=timeout,
         )

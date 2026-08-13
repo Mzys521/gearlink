@@ -41,6 +41,7 @@ class OpenAIProvider(ModelProvider):
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        timeout: float | None = None,
     ) -> None:
         """初始化 OpenAI 兼容提供者。
 
@@ -51,6 +52,10 @@ class OpenAIProvider(ModelProvider):
             model: 模型名称，默认使用 DeepSeek flash 模型。
             api_key: API 密钥；未传入时从环境变量 DEEPSEEK_API_KEY 读取。
             base_url: 服务地址，默认指向 DeepSeek 官方地址。
+            timeout: 请求超时秒数（开发方向 §6.5）；None 时使用 OpenAI SDK 默认值。
+                显式传入可防止网络挂起导致永久阻塞。SDK 内置重试已关闭
+                （``max_retries=0``），重试由框架 ``ReactAgent(max_retries=...)``
+                统一管理，避免双重重试行为不可预期。
 
         Raises:
             ValueError: 未传入 api_key 且环境变量 DEEPSEEK_API_KEY 缺失时抛出。
@@ -60,10 +65,15 @@ class OpenAIProvider(ModelProvider):
         if not api_key:
             raise ValueError("缺少 API key：请传入 api_key 参数，或设置环境变量 DEEPSEEK_API_KEY")
         self.model = model or os.environ.get("DEEPSEEK_MODEL") or DEFAULT_MODEL
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=base_url or os.environ.get("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL,
-        )
+        client_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": base_url or os.environ.get("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL,
+            # 关闭 SDK 内置重试：重试由框架 max_retries 统一管理，避免双重重试
+            "max_retries": 0,
+        }
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
+        self.client = OpenAI(**client_kwargs)
 
     def chat(
         self,

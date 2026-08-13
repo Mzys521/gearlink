@@ -4,9 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from gearlink.core.agent import MAX_ITERATIONS, SYSTEM_PROMPT, PlanExecuteAgent, ReactAgent
+from gearlink.core.agent import (
+    MAX_ITERATIONS,
+    SYSTEM_PROMPT,
+    PlanExecuteAgent,
+    ReactAgent,
+    _extract_json,
+)
 from gearlink.core.events import FinalAnswerEvent, PlanGeneratedEvent
 from gearlink.core.memory import LongTermMemory, MemoryManager, ShortTermMemory
+from gearlink.core.tool import ToolRegistry
 from gearlink.exceptions import ProviderError
 from gearlink.providers.base import ModelProvider, ModelResponse, StreamChunk, ToolCall
 from gearlink.skills import Skill, SkillLoader, SkillRegistry
@@ -56,7 +63,7 @@ class FakeProvider(ModelProvider):
         self.responses = responses
         self.calls = 0
 
-    def chat(self, messages, tools=None) -> ModelResponse:
+    def chat(self, messages, tools=None, response_format=None) -> ModelResponse:
         response = self.responses[self.calls]
         self.calls += 1
         return response
@@ -407,7 +414,7 @@ class PlanStreamProvider(ModelProvider):
         self.chunk_size = chunk_size
         self.calls = 0
 
-    def chat(self, messages, tools=None) -> ModelResponse:
+    def chat(self, messages, tools=None, response_format=None) -> ModelResponse:
         response = self.responses[self.calls]
         self.calls += 1
         return response
@@ -546,7 +553,7 @@ def test_plan_execute_propagates_provider_error():
     """规划器调用失败时，ProviderError 应向上传播（不静默吞错）"""
 
     class RaisingProvider(ModelProvider):
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, response_format=None):
             raise ProviderError("模拟服务不可用")
 
     agent = PlanExecuteAgent(provider=RaisingProvider())
@@ -763,3 +770,78 @@ def test_parallel_tool_calls_event_order_deterministic():
         "model_message",
         "final_answer",
     ]
+
+
+# ------------------- ToolRegistry 实例隔离（开发方向 §6.4） -------------------
+
+
+def test_react_agent_with_tool_registry_isolation():
+    """两个 Agent 持有不同的 ToolRegistry 实例，各自只能调用自己注册的工具。"""
+    registry_a = ToolRegistry()
+    registry_b = ToolRegistry()
+
+    schema = {
+        "description": "隔离工具",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+    registry_a.register_tool("iso_tool_a", lambda: "from_a", schema)
+    registry_b.register_tool("iso_tool_b", lambda: "from_b", schema)
+
+    # Agent A 调用自己的工具成功
+    tool_response_a = ModelResponse(
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="iso_tool_a", arguments="{}")],
+    )
+    final_response_a = ModelResponse(content="A 完成")
+    agent_a = ReactAgent(
+        provider=FakeProvider([tool_response_a, final_response_a]),
+        tool_registry=registry_a,
+    )
+    assert agent_a.run("任务") == "A 完成"
+
+    # Agent B 调用自己的工具成功
+    tool_response_b = ModelResponse(
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="iso_tool_b", arguments="{}")],
+    )
+    final_response_b = ModelResponse(content="B 完成")
+    agent_b = ReactAgent(
+        provider=FakeProvider([tool_response_b, final_response_b]),
+        tool_registry=registry_b,
+    )
+    assert agent_b.run("任务") == "B 完成"
+
+    # 验证隔离：Agent A 无法调用 B 的工具（工具调用失败为可恢复信号）
+    wrong_response = ModelResponse(
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="iso_tool_b", arguments="{}")],
+    )
+    final_wrong = ModelResponse(content="工具不可用")
+    agent_a_wrong = ReactAgent(
+        provider=FakeProvider([wrong_response, final_wrong]),
+        tool_registry=registry_a,
+    )
+    assert agent_a_wrong.run("任务") == "工具不可用"
+    tool_msgs = [m for m in agent_a_wrong.memory.get_messages() if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert "未知工具" in tool_msgs[0]["content"]
+
+
+# ------------------- _extract_json 工具函数（开发方向 §6.5） -------------------
+
+
+def test_extract_json_strips_markdown_fences():
+    """_extract_json 剥离 markdown 代码围栏后解析 JSON。"""
+    text = '```json\n["步骤一", "步骤二"]\n```'
+    assert _extract_json(text) == ["步骤一", "步骤二"]
+
+
+def test_extract_json_extracts_from_surrounding_text():
+    """_extract_json 从包含说明文字的文本中提取 JSON 数组。"""
+    text = '以下是步骤：\n["查询", "执行"]\n以上是步骤列表。'
+    assert _extract_json(text) == ["查询", "执行"]
+
+
+def test_extract_json_returns_none_on_invalid():
+    """_extract_json 对非 JSON 文本返回 None。"""
+    assert _extract_json("这只是普通文本，没有 JSON") is None

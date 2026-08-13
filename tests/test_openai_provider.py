@@ -38,7 +38,9 @@ def test_provider_reads_model_and_base_url_from_env(monkeypatch):
     with patch("gearlink.providers.openai_provider.OpenAI") as fake_openai:
         provider = OpenAIProvider()
     assert provider.model == "deepseek-chat"
-    fake_openai.assert_called_once_with(api_key="sk-test", base_url="https://example.com/v1")
+    fake_openai.assert_called_once_with(
+        api_key="sk-test", base_url="https://example.com/v1", max_retries=0
+    )
 
 
 def test_chat_returns_model_response():
@@ -216,3 +218,17 @@ def test_chat_omits_response_format_by_default():
 
     kwargs = provider.client.chat.completions.create.call_args.kwargs
     assert "response_format" not in kwargs  # 默认不传，行为等价现状
+
+
+# ------------------- timeout 参数（开发方向 §6.5） -------------------
+
+
+def test_openai_provider_accepts_timeout(monkeypatch):
+    """OpenAIProvider 接受 timeout 参数并透传给 OpenAI 客户端构造函数。"""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    with patch("gearlink.providers.openai_provider.OpenAI") as fake_openai:
+        OpenAIProvider(timeout=30.0)
+
+    fake_openai.assert_called_once()
+    _, kwargs = fake_openai.call_args
+    assert kwargs["timeout"] == 30.0
