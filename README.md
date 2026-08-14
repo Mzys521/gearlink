@@ -16,8 +16,14 @@
 ## 安装
 
 ```bash
-pip install -e .          # 开发安装
-pip install -r requirements.txt
+pip install gearlink              # 从 PyPI 安装（推荐）
+# 或安装可选依赖：
+pip install gearlink[anthropic]   # Anthropic Claude 支持
+pip install gearlink[mcp]         # MCP 外部工具支持
+pip install gearlink[dev]         # 开发依赖（pytest / ruff）
+
+# 开发安装（从源码）：
+pip install -e ".[dev]"
 ```
 
 在项目根目录创建 `.env`（参考 `.env.example`）：

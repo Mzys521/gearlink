@@ -1,14 +1,27 @@
 # 打包与工具链配置（单一事实来源），遵循 docs/开发规范.md
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gearlink"
 version = "0.2.0"
-description = "轻量级 Agent 框架：ReAct 循环、可插拔模型提供者与工具注册表"
+description = "轻量级 Agent 框架：多策略编排（ReAct / 规划-执行 / 多 Agent 协作）+ 模型/记忆/工具三可插拔 + 技能扩展"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "GearLink Contributors" }]
+keywords = ["agent", "llm", "react", "orchestration", "framework"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "openai>=2.48.0",
     "pyyaml>=6.0",
@@ -27,6 +40,12 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Mzys521/gearlink"
+Repository = "https://github.com/Mzys521/gearlink"
+Issues = "https://github.com/Mzys521/gearlink/issues"
+Changelog = "https://github.com/Mzys521/gearlink/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["gearlink*"]

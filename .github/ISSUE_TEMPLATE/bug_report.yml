@@ -1,0 +1,78 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量填写完整，便于快速定位问题。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug 描述
+      description: 清晰描述遇到了什么问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 最小可复现示例
+      placeholder: |
+        1. 运行 `python -c "..."`
+        2. 输入 `...`
+        3. 观察到 `...`
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: gearlink 版本
+      description: 运行 `pip show gearlink` 查看
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python 版本
+      placeholder: "3.12"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: 使用的 Provider
+      options:
+        - OpenAIProvider
+        - OllamaProvider
+        - AnthropicProvider
+        - 自定义 Provider
+        - 不适用
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志 / 堆栈
+      render: shell
