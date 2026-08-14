@@ -1,5 +1,10 @@
 # GearLink
 
+[![PyPI version](https://badge.fury.io/py/gearlink.svg)](https://pypi.org/project/gearlink/)
+[![Python](https://img.shields.io/pypi/pyversions/gearlink.svg)](https://pypi.org/project/gearlink/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/Mzys521/gearlink/actions/workflows/ci.yml/badge.svg)](https://github.com/Mzys521/gearlink/actions)
+
 轻量级 Agent 框架：多策略 Agent 编排（ReAct / 规划-执行 / 多 Agent 协作）+ 三个可插拔维度（模型、记忆、工具）+ 技能扩展，不引入重型框架。
 
 ## 特性
