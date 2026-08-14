@@ -7,7 +7,25 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-14
+
 ### Added
+
+- 依赖编排（开发方向 §6.8）：
+  - `DependentOrchestrator`：`Orchestrator` 纯新增子类，`dependencies` 编程式声明工人依赖（worker 名 → 上游 worker 名列表），执行按 Kahn 拓扑分层（层内可并行、层间串行），上游结果以 `[上游结果]` 报告段落自动注入下游任务，实现流水线式多 Agent 协作；构造时校验未登记引用与依赖环（抛 `GearLinkError`）；`dependencies=None` 时行为等价 `Orchestrator`；
+  - `TeamPlanGeneratedEvent` 新增可选 `dependencies` 字段（默认 None，向后兼容）；
+  - 新增 `examples/dependent_orchestrator_demo.py` 与 `tests/test_dependent_orchestrator.py`（16 用例）；`docs/接口文档.md` / `docs/架构设计.md` / `docs/开发方向.md` / `docs/使用教程.md` / `README.md` 同步更新。
+
+## [0.2.1] - 2026-08-14
+
+### Added
+
+- 新增 GitHub Issue 模板（bug_report / feature_request / config）
+- 新增 GitHub PR 模板（变更类型 + 检查清单）
+- 新增 `SECURITY.md` 安全策略
+- 安装文档更新为 `pip install gearlink`（从 PyPI 安装）
+
+## [0.2.0] - 2026-08-13
 
 - 打包元数据：`pyproject.toml` 补齐 PEP 639 的 `license` / `license-files`、`authors`、`keywords`、`classifiers` 与 `[project.urls]`，`build-system` 升级为 `setuptools>=77`；`python -m build` 可产出 sdist + wheel，为发布 PyPI 就绪。
 

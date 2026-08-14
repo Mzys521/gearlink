@@ -205,9 +205,12 @@ class TeamPlanGeneratedEvent(AgentEvent):
 
     Attributes:
         assignments: 子任务分派列表，每项为 {"worker": 工人名, "task": 子任务指令}。
+        dependencies: 工人依赖声明（worker 名 → 其依赖的上游 worker 名列表）；
+            仅依赖编排（DependentOrchestrator）产出，默认 None。
     """
 
     assignments: list[dict[str, str]] = field(default_factory=list)
+    dependencies: dict[str, list[str]] | None = None
     type: str = "team_plan_generated"
 
 

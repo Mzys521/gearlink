@@ -3,7 +3,8 @@
 只有从此处显式导出的名称才是公共 API（开发规范 §5.1，架构设计 §2）：
 
 - Agent：`Agent`（编排策略抽象）/ `ReactAgent`（ReAct）/ `PlanExecuteAgent`（规划-执行）/
-  `Orchestrator`（多 Agent 协作主管-工人编排）；
+  `Orchestrator`（多 Agent 协作主管-工人编排）/
+  `DependentOrchestrator`（依赖编排，工人间流水线协作）；
   `run_events` 事件流含 `AgentEvent` 体系与 `HookFn` 回调；
 - 记忆：`Memory` / `MemoryEntry` / `Session` / `ShortTermMemory` /
   `LongTermMemory` / `MemoryManager` / `VectorStore` / `ChromaVectorStore`；
@@ -40,7 +41,7 @@ from gearlink.core.events import (
     jsonl_hook,
     load_jsonl_events,
 )
-from gearlink.core.orchestrator import Orchestrator
+from gearlink.core.orchestrator import DependentOrchestrator, Orchestrator
 from gearlink.core.memory import (
     ChromaVectorStore,
     ContextBuilder,
@@ -110,6 +111,7 @@ __all__ = [
     "PlanStepStartEvent",
     "PlanStepEndEvent",
     "Orchestrator",
+    "DependentOrchestrator",
     "TeamPlanGeneratedEvent",
     "AgentHandoffEvent",
     "SubtaskEndEvent",
