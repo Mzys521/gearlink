@@ -34,6 +34,7 @@ from gearlink.core.events import (
 from gearlink.exceptions import GearLinkError
 
 __all__ = [
+    "DependentOrchestrator",
     "Orchestrator",
 ]
 
@@ -358,3 +359,288 @@ class Orchestrator(Agent):
         answer = response.content or ""
         logger.debug("汇总器产出最终答案（%d 字）", len(answer))
         return answer
+
+
+# ------------------- 依赖编排 -------------------
+
+
+def _detect_dependency_cycle(dependencies: dict[str, list[str]]) -> list[str] | None:
+    """检测工人依赖图的环（DFS 回溯，开发方向 §6.8）。
+
+    Args:
+        dependencies: worker 名 → 其依赖的上游 worker 名列表。
+
+    Returns:
+        环上的 worker 名列表（起点重复出现于末尾）；无环返回 None。
+    """
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def dfs(node: str, path: list[str]) -> list[str] | None:
+        visiting.add(node)
+        path.append(node)
+        for dep in dependencies.get(node, []):
+            if dep in visiting:
+                start = path.index(dep)
+                return path[start:] + [dep]
+            if dep not in visited:
+                cycle = dfs(dep, path)
+                if cycle is not None:
+                    return cycle
+        path.pop()
+        visiting.remove(node)
+        visited.add(node)
+        return None
+
+    for node in dependencies:
+        if node not in visited:
+            cycle = dfs(node, [])
+            if cycle is not None:
+                return cycle
+    return None
+
+
+class DependentOrchestrator(Orchestrator):
+    """依赖编排器：主管-工人模式 + 工人间依赖（开发方向 §6.8）。
+
+    在 `Orchestrator` 基础上新增编程式工人依赖声明：`dependencies` 记录
+    worker 名 → 其依赖的上游 worker 名列表，执行时按依赖做 Kahn 拓扑分层
+    （层内可并行、层间必须串行），并把上游工人的结果自动注入下游任务文本
+    （追加 `[上游结果]` 报告段落），实现「整理资料 → 撰写新闻」这类流水线协作。
+
+    与 `Orchestrator` 的差异：
+    - 依赖关系由用户在构造时声明（确定性强），主管仍只负责拆单；
+    - 调度按依赖分层，而非「全串行 / 全并行」；
+    - 分派到未登记工人、上游未收敛等失败场景不中断编排（结果以兜底文案
+      记录并照常注入下游）。
+
+    事件流与 `Orchestrator` 一致：`TeamPlanGeneratedEvent`（额外携带
+    `dependencies` 字段）→ 每个子任务 `AgentHandoffEvent`（task 为注入后
+    文本）→ 工人事件（转发并重新编号）→ `SubtaskEndEvent`；最后产出
+    `FinalAnswerEvent`。
+    """
+
+    def __init__(
+        self,
+        supervisor: Agent,
+        workers: dict[str, Agent],
+        dependencies: dict[str, list[str]] | None = None,
+        parallel: bool = False,
+        hooks: list[HookFn] | None = None,
+    ) -> None:
+        """初始化依赖编排器。
+
+        Args:
+            supervisor: 主管 Agent，负责任务拆分与分派（其 provider 同时用于
+                结果汇总）。与 `Orchestrator` 相同，为纯 LLM 调用。
+            workers: 工人名称 → 工人 Agent 的映射；每个工人独立配置自己的
+                工具/技能/记忆。不能为空。
+            dependencies: 工人依赖声明：worker 名 → 其依赖的上游 worker 名
+                列表。声明了依赖的下游工人在上游全部任务完成后执行，其任务
+                文本自动追加上游结果段落。None 表示无依赖（行为等价
+                `Orchestrator`）。上游工人本次未被分派时该依赖静默忽略。
+            parallel: True 时同层互不依赖的子任务经线程池并行执行（要求工人
+                自身及其工具线程安全）；False 表示全串行（按拓扑序）。层间
+                始终串行。事件产出顺序均按分派清单确定性排序。
+            hooks: 事件回调列表（on_step 语义）；同时作用于编排层与全部工人，
+                经共享回调列表实现（与 Orchestrator 一致）。
+
+        Raises:
+            GearLinkError: workers 为空、dependencies 引用了未登记的工人、
+                或依赖图存在循环时抛出。
+        """
+        dependencies = dict(dependencies or {})
+        unknown = sorted(
+            {name for name in dependencies if name not in workers}
+            | {dep for deps in dependencies.values() for dep in deps if dep not in workers}
+        )
+        if unknown:
+            raise GearLinkError(f"dependencies 引用了未登记的工人: {unknown}")
+        cycle = _detect_dependency_cycle(dependencies)
+        if cycle is not None:
+            raise GearLinkError(f"工人依赖存在循环: {' -> '.join(cycle)}")
+        super().__init__(supervisor=supervisor, workers=workers, parallel=parallel, hooks=hooks)
+        self.dependencies = dependencies
+        logger.debug(
+            "DependentOrchestrator 初始化: dependencies=%s, parallel=%s",
+            self.dependencies,
+            self.parallel,
+        )
+
+    def run_events(self, user_input: str, *, stream: bool = False) -> Iterator[AgentEvent]:
+        """执行一次用户请求，按依赖拓扑分层产出协作流程的事件（编排的唯一实现）。
+
+        Args:
+            user_input: 用户的输入文本。
+            stream: True 时工人以流式接口产出文本增量（TextDeltaEvent）；
+                False 时整段响应以 ModelMessageEvent 产出。
+
+        Yields:
+            AgentEvent: 协作流程的事件序列。
+
+        Raises:
+            ProviderError: 主管 / 工人 / 汇总器的模型服务调用失败，
+                由调用方决定重试策略。
+        """
+        # 1) 分派：主管把任务拆分并指派给工人（解析失败退化为全员兜底）
+        logger.info("依赖编排开始: stream=%s, 工人数=%d", stream, len(self.workers))
+        assignments = self._dispatch(user_input)
+        logger.info("分派完成: %d 个子任务", len(assignments))
+
+        seq = 0
+        seq = yield from self._emit_event(
+            TeamPlanGeneratedEvent(assignments=assignments, dependencies=self.dependencies or None),
+            seq,
+        )
+
+        # 2) 执行：按依赖拓扑分层执行；每层执行前把上游工人结果注入任务文本。
+        # 层内「先派单 → 执行（串行或线程池并行）→ 按分派序产出事件」，层间串行。
+        layers = self._topological_layers(assignments)
+        executed: dict[str, list[str]] = {}  # worker → 已完成的结果文本列表
+        results_by_index: dict[int, str] = {}
+        for layer_index, layer in enumerate(layers):
+            logger.debug("执行第 %d/%d 层: %d 个子任务", layer_index + 1, len(layers), len(layer))
+            injected: list[dict[str, Any]] = []
+            for index in layer:
+                assignment = assignments[index]
+                upstream = {
+                    dep: executed[dep]
+                    for dep in self.dependencies.get(assignment["worker"], [])
+                    if dep in executed
+                }
+                injected.append(
+                    {
+                        "index": index,
+                        "worker": assignment["worker"],
+                        "task": self._inject_results(assignment["task"], upstream),
+                    }
+                )
+
+            if self.parallel and len(injected) > 1:
+                for item in injected:
+                    seq = yield from self._emit_event(
+                        AgentHandoffEvent(
+                            index=item["index"], worker=item["worker"], task=item["task"]
+                        ),
+                        seq,
+                    )
+                runnable = [{"worker": item["worker"], "task": item["task"]} for item in injected]
+                with ThreadPoolExecutor(max_workers=len(injected)) as pool:
+                    outcomes = list(pool.map(lambda a: self._run_worker(a, stream), runnable))
+                for item, (worker_events, result) in zip(injected, outcomes):
+                    for sub_event in worker_events:
+                        sub_event.seq = seq
+                        seq += 1
+                        yield sub_event
+                    results_by_index[item["index"]] = result
+                    executed.setdefault(item["worker"], []).append(result)
+                    seq = yield from self._emit_event(
+                        SubtaskEndEvent(index=item["index"], worker=item["worker"], result=result),
+                        seq,
+                    )
+            else:
+                for item in injected:
+                    seq = yield from self._emit_event(
+                        AgentHandoffEvent(
+                            index=item["index"], worker=item["worker"], task=item["task"]
+                        ),
+                        seq,
+                    )
+                    result: str | None = None
+                    worker = self.workers.get(item["worker"])
+                    if worker is None:
+                        result = f"工人 {item['worker']} 未登记，子任务未执行。"
+                    else:
+                        for sub_event in worker.run_events(item["task"], stream=stream):
+                            sub_event.seq = seq
+                            seq += 1
+                            if isinstance(sub_event, FinalAnswerEvent):
+                                result = sub_event.content
+                            elif isinstance(sub_event, LoopAbortEvent):
+                                result = sub_event.reason
+                            yield sub_event
+                    if result is None:
+                        result = _MAX_ITERATIONS_FALLBACK
+                    results_by_index[item["index"]] = result
+                    executed.setdefault(item["worker"], []).append(result)
+                    seq = yield from self._emit_event(
+                        SubtaskEndEvent(index=item["index"], worker=item["worker"], result=result),
+                        seq,
+                    )
+
+        # 3) 汇总：按分派清单原始顺序重组结果；多子任务时整合为最终答案，
+        # 单子任务直接透传（工人已流出文本，不再重复产出增量）。
+        results = [results_by_index[index] for index in range(len(assignments))]
+        if len(assignments) > 1:
+            logger.info("汇总 %d 个子任务结果为最终答案", len(assignments))
+            answer = self._synthesize(user_input, assignments, results)
+        else:
+            answer = results[0]
+        if stream and len(assignments) > 1:
+            seq = yield from self._emit_event(TextDeltaEvent(delta=answer), seq)
+        yield from self._emit_event(FinalAnswerEvent(content=answer), seq)
+
+    def _topological_layers(self, assignments: list[dict[str, str]]) -> list[list[int]]:
+        """把分派清单按 worker 级依赖做 Kahn 拓扑分层。
+
+        同一 worker 被派多个任务时，下游任务的依赖数按上游 worker 的全部任务
+        计数（上游全部完成后下游才就绪）；层内下标按分派清单顺序升序，保证
+        事件产出顺序确定。
+
+        Args:
+            assignments: 主管分派清单。
+
+        Returns:
+            每层的 assignment 下标列表（按执行顺序排列的层序列）。
+        """
+        worker_indices: dict[str, list[int]] = {}
+        for index, assignment in enumerate(assignments):
+            worker_indices.setdefault(assignment["worker"], []).append(index)
+
+        # 每个任务的依赖数：其依赖的、且已分派的上游 worker 的任务总数
+        indegree: list[int] = []
+        for assignment in assignments:
+            deps = [
+                dep
+                for dep in self.dependencies.get(assignment["worker"], [])
+                if dep in worker_indices
+            ]
+            indegree.append(sum(len(worker_indices[dep]) for dep in set(deps)))
+
+        # 下游关系：任务 i 完成解除任务 j 的一个依赖
+        downstream: list[list[int]] = [[] for _ in assignments]
+        for index, assignment in enumerate(assignments):
+            for other_index, other in enumerate(assignments):
+                if other_index != index and assignment["worker"] in self.dependencies.get(
+                    other["worker"], []
+                ):
+                    downstream[index].append(other_index)
+
+        layers: list[list[int]] = []
+        remaining = set(range(len(assignments)))
+        while remaining:
+            ready = [index for index in sorted(remaining) if indegree[index] == 0]
+            layers.append(ready)
+            for index in ready:
+                remaining.discard(index)
+                for other in downstream[index]:
+                    indegree[other] -= 1
+        return layers
+
+    @staticmethod
+    def _inject_results(task: str, upstream: dict[str, list[str]]) -> str:
+        """把上游工人结果拼接为报告段落注入任务文本。
+
+        Args:
+            task: 主管分派的原始子任务指令。
+            upstream: 已执行的上游 worker 名 → 其全部结果文本列表。
+
+        Returns:
+            注入后的任务文本；无上游结果时原样返回。
+        """
+        if not upstream:
+            return task
+        report = "\n".join(
+            f"- {name}: {text}" for name, texts in upstream.items() for text in texts
+        )
+        return f"{task}\n\n[上游结果]\n{report}"

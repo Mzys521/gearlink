@@ -9,7 +9,7 @@
 
 ## 特性
 
-- **多策略 Agent**：`Agent` 抽象统一 `run` / `run_stream` / `run_events` 契约；`ReactAgent` 编排 Reason → Act → Observe，工具失败作为可恢复信号写回模型处理；`PlanExecuteAgent` 先规划后执行（规划 → 步骤子循环 → 整合），任务分解更可控；`Orchestrator` 主管-工人多 Agent 协作（主管分派子任务，各工人独立执行后汇总）；
+- **多策略 Agent**：`Agent` 抽象统一 `run` / `run_stream` / `run_events` 契约；`ReactAgent` 编排 Reason → Act → Observe，工具失败作为可恢复信号写回模型处理；`PlanExecuteAgent` 先规划后执行（规划 → 步骤子循环 → 整合），任务分解更可控；`Orchestrator` 主管-工人多 Agent 协作（主管分派子任务，各工人独立执行后汇总）；`DependentOrchestrator` 依赖编排（工人间流水线协作，上游结果自动注入下游）；
 - **事件流 + 回调**：`run_events` 逐步产出 `AgentEvent` 体系事件，`hooks` / `add_hook` 注入回调实现 on\_step 观察与干预；
 - **可观测性**：`TokenUsage` 用量透传（`ModelMessageEvent.usage`）、`JsonlEventSink` 事件落盘与离线回放、`UsageTracker` 按标签聚合用量与成本估算；
 - **模型可插拔**：面向 `ModelProvider` 抽象编程，内置 OpenAI 兼容实现（OpenAI / DeepSeek / 国产兼容接口）、本地 `OllamaProvider`（无需密钥）与 `AnthropicProvider`；支持可重试错误的指数退避重试（`max_retries`）与结构化输出（`response_format`）；
@@ -158,7 +158,8 @@ print(agent.run("对比 Python 与 Go 的适用场景并给出选型建议"))
 ### 多 Agent 协作（Orchestrator）
 
 多角色分工用 `Orchestrator`：主管 Agent 把任务拆分派给登记的工人（各配独立
-工具/记忆），各工人独立完成后汇总为最终答案（`parallel=True` 可并行执行）：
+工具/记忆），各工人独立完成后汇总为最终答案（`parallel=True` 可并行执行）。
+各子任务应互不依赖，适合拆成多个可并行的独立维度：
 
 ```python
 from gearlink import Orchestrator, OpenAIProvider, ReactAgent
@@ -166,16 +167,42 @@ from gearlink import Orchestrator, OpenAIProvider, ReactAgent
 orchestrator = Orchestrator(
     supervisor=ReactAgent(provider=OpenAIProvider()),
     workers={
-        "researcher": ReactAgent(provider=OpenAIProvider(), tools=["search"]),
-        "writer": ReactAgent(provider=OpenAIProvider(), tools=[]),
+        "market": ReactAgent(provider=OpenAIProvider()),  # 市场角度
+        "tech": ReactAgent(provider=OpenAIProvider()),  # 技术角度
+        "community": ReactAgent(provider=OpenAIProvider()),  # 社区角度
     },
+    parallel=True,
 )
-print(orchestrator.run("调研并撰写一份产品介绍"))
+print(orchestrator.run("从市场、技术、社区三个角度分别调研 GearLink"))
 ```
 
 协作过程经事件流暴露：`TeamPlanGeneratedEvent`（分派清单）→ `AgentHandoffEvent`
 （派单）→ 工人事件 → `SubtaskEndEvent`；与 `PlanExecuteAgent`（单模型串行步骤）
 互补。分派输出无法解析时退化为把原任务派给全部工人。
+
+### 依赖编排（DependentOrchestrator）
+
+工人间存在流水线依赖（如「整理资料 → 基于资料撰写」）时用 `DependentOrchestrator`：
+`dependencies` 声明工人依赖，执行按依赖拓扑分层（层内可并行、层间串行），上游
+结果以 `[上游结果]` 报告段落自动注入下游任务文本：
+
+```python
+from gearlink import DependentOrchestrator, OpenAIProvider, ReactAgent
+
+orchestrator = DependentOrchestrator(
+    supervisor=ReactAgent(provider=OpenAIProvider()),
+    workers={
+        # 真实场景可给 researcher 配检索工具（tools=... 白名单）
+        "researcher": ReactAgent(provider=OpenAIProvider()),
+        "writer": ReactAgent(provider=OpenAIProvider()),
+    },
+    dependencies={"writer": ["researcher"]},  # writer 等 researcher 完成后执行
+)
+print(orchestrator.run("写一篇近期新闻"))
+```
+
+`dependencies=None` 时行为与 `Orchestrator` 完全一致；依赖引用未登记工人或存在
+循环时构造抛 `GearLinkError`；上游未收敛时结果以兜底文案注入，不中断编排。
 
 ### 更多模型提供者
 
@@ -288,7 +315,7 @@ disable_logging()  # 关闭：恢复静默
 
 | 分类    | 导出名称                                                                                                                                                                                                                                                                                |
 | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent | `Agent`、`ReactAgent`、`PlanExecuteAgent`、`Orchestrator`                                                                                                                                                                                                                              |
+| Agent | `Agent`、`ReactAgent`、`PlanExecuteAgent`、`Orchestrator`、`DependentOrchestrator`                                                                                                                                                                                                                              |
 | 事件    | `AgentEvent`、`StepStartEvent`、`TextDeltaEvent`、`ModelMessageEvent`、`ToolCallStartEvent`、`ToolCallEndEvent`、`FinalAnswerEvent`、`LoopAbortEvent`、`PlanGeneratedEvent`、`PlanStepStartEvent`、`PlanStepEndEvent`、`TeamPlanGeneratedEvent`、`AgentHandoffEvent`、`SubtaskEndEvent`、`HookFn` |
 | 记忆    | `Memory`、`MemoryEntry`、`Session`、`ShortTermMemory`、`LongTermMemory`、`MemoryManager`、`EmbeddingFn`、`ProfileHookFn`、`VectorStore`、`ChromaVectorStore`、`ContextBuilder`                                                                                                                |
 | 工具    | `TOOL_REGISTRY`、`TOOL_SCHEMAS`、`ToolRegistry`、`register_tool`、`call_tool`、`build_tool_schema`、`set_skill_registry`                                                                                                                                                                  |
@@ -312,6 +339,7 @@ disable_logging()  # 关闭：恢复静默
 - [examples/observability\_demo.py](examples/observability_demo.py)：token 用量透传 + JSONL 事件落盘回放 + `UsageTracker` 成本估算（免密钥）；
 - [examples/memory\_advanced\_demo.py](examples/memory_advanced_demo.py)：上下文摘要压缩 + 用户画像 + 检索阈值/MMR + 自定义 `VectorStore`（免密钥，无需 chromadb）；
 - [examples/orchestrator\_demo.py](examples/orchestrator_demo.py)：`Orchestrator` 主管-工人多 Agent 协作（免密钥）；
+- [examples/dependent\_orchestrator\_demo.py](examples/dependent_orchestrator_demo.py)：`DependentOrchestrator` 工人依赖流水线编排（免密钥）；
 - [examples/ollama\_local\_demo.py](examples/ollama_local_demo.py)：`OllamaProvider` 本地模型（无需 API key，需本地 Ollama 服务）；
 - [examples/anthropic\_demo.py](examples/anthropic_demo.py)：`AnthropicProvider` 接入 Claude（需 `gearlink[anthropic]` 与密钥）；
 - [examples/mcp\_client\_demo.py](examples/mcp_client_demo.py)：`McpClient` 消费外部 MCP 服务器工具（需 `gearlink[mcp]`）；
