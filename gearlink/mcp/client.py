@@ -12,6 +12,7 @@
 
 import asyncio
 import concurrent.futures
+import logging
 from collections.abc import Awaitable
 from typing import Any
 
@@ -20,6 +21,8 @@ from gearlink.exceptions import ToolError
 
 #: 远端工具登记进本地注册表时的命名空间前缀格式
 _TOOL_NAME_TEMPLATE = "mcp_{server}_{tool}"
+
+logger = logging.getLogger(__name__)
 
 
 def _run_async(coro: Awaitable[Any]) -> Any:
@@ -87,9 +90,11 @@ class McpClient:
             ToolError: 远端清单获取失败，或工具名与已注册工具冲突时抛出
                 （冲突时已成功登记的部分保持登记，可调用 unregister_tools 回滚）。
         """
+        logger.debug("拉取 MCP 服务器 %s 的工具清单", self.server_name)
         try:
             listing = _run_async(self.session.list_tools())
         except Exception as e:
+            logger.warning("获取 MCP 服务器 %s 的工具清单失败: %s", self.server_name, e)
             raise ToolError(f"获取 MCP 服务器 {self.server_name} 的工具清单失败: {e}") from e
 
         names: list[str] = []
@@ -117,6 +122,7 @@ class McpClient:
                 )
             names.append(local_name)
         self._registered.extend(names)
+        logger.info("已登记 MCP 服务器 %s 的 %d 个工具", self.server_name, len(names))
         return names
 
     def unregister_tools(self) -> None:
@@ -135,11 +141,13 @@ class McpClient:
                 if index is not None:
                     del TOOL_SCHEMAS[index]
         self._registered = []
+        logger.debug("已注销 MCP 服务器 %s 的全部工具", self.server_name)
 
     def _make_invoker(self, remote_name: str):
         """生成远端工具的本地调用函数：转发参数并归一化结果为文本。"""
 
         def invoke(**arguments: Any) -> str:
+            logger.debug("调用 MCP 工具 %s.%s", self.server_name, remote_name)
             result = _run_async(self.session.call_tool(remote_name, arguments))
             text = _normalize_result(result)
             if getattr(result, "isError", False):

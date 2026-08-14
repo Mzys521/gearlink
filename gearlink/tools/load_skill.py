@@ -8,10 +8,14 @@
 2. 回退到模块级默认注册表的 _skill_registry（向后兼容）。
 """
 
+import logging
+
 from gearlink.core import tool as _tool_module
 from gearlink.core.tool import get_current_tool_registry, register_tool
 from gearlink.exceptions import ToolError
 from gearlink.skills import SkillLoader
+
+logger = logging.getLogger(__name__)
 
 
 def load_skill(skill_name: str) -> dict[str, str]:
@@ -35,9 +39,11 @@ def load_skill(skill_name: str) -> dict[str, str]:
         registry = _tool_module._default_registry.skill_registry
 
     if registry is None:
+        logger.warning("技能注册表未注入，无法加载技能 %s", skill_name)
         raise ToolError("技能注册表未注入，无法加载技能")
     skill = registry.get(skill_name)  # 未找到时抛 SkillNotFoundError（GearLinkError 子类）
     instructions = SkillLoader.load_full_instructions(skill)
+    logger.debug("加载技能: %s", skill_name)
     return {"skill_name": skill_name, "instructions": instructions}
 
 

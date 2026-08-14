@@ -7,6 +7,7 @@
 """
 
 import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from gearlink.providers.base import TokenUsage, ToolCall
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AgentEvent",
@@ -260,6 +263,7 @@ class JsonlEventSink:
         """
         self.path = Path(path)
         self._file = self.path.open("a", encoding="utf-8")
+        logger.debug("打开事件落盘文件: %s", self.path)
 
     def write(self, event: AgentEvent) -> None:
         """写入一个事件并立即刷盘（进程崩溃也不丢已产出事件）。"""
@@ -270,6 +274,7 @@ class JsonlEventSink:
         """关闭底层文件（幂等）。"""
         if not self._file.closed:
             self._file.close()
+            logger.debug("关闭事件落盘文件: %s", self.path)
 
     def __enter__(self) -> "JsonlEventSink":
         return self
@@ -310,4 +315,5 @@ def load_jsonl_events(path: str | Path) -> list[dict[str, Any]]:
             line = line.strip()
             if line:
                 events.append(json.loads(line))
+    logger.debug("回放事件文件 %s: 共 %d 条", path, len(events))
     return events

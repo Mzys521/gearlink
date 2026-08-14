@@ -292,6 +292,13 @@ class ReactAgent(Agent):
             memory = ShortTermMemory(max_message=20)
             memory.add_message({"role": "system", "content": _build_system_prompt(skill_registry)})
         self.memory = memory
+        logger.debug(
+            "ReactAgent 初始化: max_retries=%d, parallel_tool_calls=%s, tools=%s, memory=%s",
+            self.max_retries,
+            self.parallel_tool_calls,
+            self.tools,
+            type(memory).__name__,
+        )
 
     def _build_messages(self, query: str | None = None) -> list[dict[str, Any]]:
         """基于记忆组装本轮请求消息。
@@ -339,6 +346,7 @@ class ReactAgent(Agent):
         """
         # 将用户输入添加到记忆
         self.memory.add_message({"role": "user", "content": user_input})
+        logger.info("ReAct 循环开始: stream=%s", stream)
 
         seq = 0
         for iteration in range(MAX_ITERATIONS):
@@ -347,6 +355,7 @@ class ReactAgent(Agent):
             # 推理：默认仅首轮携带查询注入长期记忆；开启 retrieve_every_iteration 时每轮都注入
             query = user_input if (iteration == 0 or self.retrieve_every_iteration) else None
             messages = self._build_messages(query)
+            logger.debug("第 %d 轮: 组装 %d 条请求消息", iteration, len(messages))
 
             response, seq = yield from self._call_model(
                 messages, iteration=iteration, stream=stream, seq=seq
@@ -365,6 +374,11 @@ class ReactAgent(Agent):
             # 如果模型没有调用工具，说明已经生成了最终答案，直接返回
             if not response.tool_calls:
                 self.memory.add_message({"role": "assistant", "content": response.content})
+                logger.info(
+                    "ReAct 收敛: 第 %d 轮产出最终答案（%d 字）",
+                    iteration,
+                    len(response.content or ""),
+                )
                 yield from self._emit_event(
                     FinalAnswerEvent(iteration=iteration, content=response.content), seq
                 )
@@ -374,6 +388,7 @@ class ReactAgent(Agent):
             seq = yield from self._execute_tool_calls(response, iteration=iteration, seq=seq)
 
         # 达到最大迭代次数仍未得到答案
+        logger.warning("ReAct 达到最大迭代次数 %d，中止循环", MAX_ITERATIONS)
         yield from self._emit_event(LoopAbortEvent(reason=_MAX_ITERATIONS_FALLBACK), seq)
 
     def _call_model(
@@ -408,6 +423,13 @@ class ReactAgent(Agent):
         """
         attempt = 0
         tool_schemas = self._available_tool_schemas()
+        logger.debug(
+            "调用模型: iteration=%d, stream=%s, messages=%d, tools=%d",
+            iteration,
+            stream,
+            len(messages),
+            len(tool_schemas),
+        )
         while True:
             emitted_delta = False
             try:
@@ -459,6 +481,12 @@ class ReactAgent(Agent):
             更新后的事件流序号（seq + 已产出事件数），供 `yield from` 接收。
         """
         # 行动：模型决定调用工具，将工具调用记录到记忆
+        logger.debug(
+            "执行工具调用: iteration=%d, 工具数=%d, 并行=%s",
+            iteration,
+            len(response.tool_calls),
+            self.parallel_tool_calls and len(response.tool_calls) > 1,
+        )
         self.memory.add_message(
             {
                 "role": "assistant",
@@ -553,6 +581,7 @@ class ReactAgent(Agent):
             arguments = json.loads(tool_call.arguments or "{}")
         except json.JSONDecodeError:
             arguments = {}
+            logger.debug("工具 %s 参数解析失败，使用空参数", tool_call.name)
 
         # 执行工具（经本 Agent 的工具注册表调度，含 contextvars 上下文设置）
         try:
@@ -729,6 +758,7 @@ class PlanExecuteAgent(Agent):
         """
         # 1) 规划：把任务分解为步骤清单（解析失败退化为单步骤）
         plan = self._plan(user_input)
+        logger.info("规划完成: %d 个步骤", len(plan))
 
         seq = 0
         seq = yield from self._emit_event(PlanGeneratedEvent(steps=plan), seq)
@@ -736,6 +766,7 @@ class PlanExecuteAgent(Agent):
         # 2) 执行：逐步运行内部 ReAct 执行器，转发执行器事件并统一编号
         step_results: list[str] = []
         for index, step in enumerate(plan):
+            logger.debug("执行步骤 %d/%d: %s", index + 1, len(plan), step)
             seq = yield from self._emit_event(PlanStepStartEvent(index=index, step=step), seq)
 
             step_answer: str | None = None
@@ -753,10 +784,12 @@ class PlanExecuteAgent(Agent):
             seq = yield from self._emit_event(
                 PlanStepEndEvent(index=index, step=step, result=step_results[-1]), seq
             )
+            logger.debug("步骤 %d/%d 完成（%d 字）", index + 1, len(plan), len(step_results[-1]))
 
         # 3) 整合：多步骤时汇总为最终答案，单步骤直接透传。
         # 单步骤时执行器已以 TextDeltaEvent 流出文本，不再重复产出增量。
         if len(plan) > 1:
+            logger.info("整合 %d 个步骤结果为最终答案", len(plan))
             answer = self._synthesize(user_input, plan, step_results)
         else:
             answer = step_results[0]
@@ -790,6 +823,7 @@ class PlanExecuteAgent(Agent):
         if len(steps) > self.max_steps:
             logger.info("规划步骤 %d 个，超出上限 %d，已截断", len(steps), self.max_steps)
             return steps[: self.max_steps]
+        logger.debug("规划器产出 %d 个步骤", len(steps))
         return steps
 
     def _synthesize(self, user_input: str, plan: list[str], step_results: list[str]) -> str:
@@ -806,6 +840,7 @@ class PlanExecuteAgent(Agent):
         Raises:
             ProviderError: 整合器调用失败时向上传播。
         """
+        logger.debug("整合器调用: 步骤数=%d", len(plan))
         report = "\n".join(
             f"{index + 1}. {step}\n   结果：{result}"
             for index, (step, result) in enumerate(zip(plan, step_results))
@@ -819,4 +854,6 @@ class PlanExecuteAgent(Agent):
                 },
             ]
         )
-        return response.content or ""
+        answer = response.content or ""
+        logger.debug("整合器产出最终答案（%d 字）", len(answer))
+        return answer

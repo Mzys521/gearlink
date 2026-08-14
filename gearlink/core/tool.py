@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import contextvars
 import inspect
+import logging
 import types
 from collections.abc import Callable
 from typing import Any, Union, get_args, get_origin
 
 from gearlink.exceptions import ToolError, ToolNotFoundError
 from gearlink.skills import SkillRegistry  # 导入内存注册表（契约类型，非具体实现）
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ToolRegistry",
@@ -107,6 +110,7 @@ class ToolRegistry:
                 },
             }
         )
+        logger.debug("注册工具: %s", name)
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """根据工具名和参数执行工具，返回工具结果。
@@ -127,9 +131,11 @@ class ToolRegistry:
         if name not in self._registry:
             raise ToolNotFoundError(f"未知工具: {name}")
         token = _current_tool_registry.set(self)
+        logger.debug("调用工具: %s(%s)", name, arguments)
         try:
             return self._registry[name](**arguments)
         except Exception as e:
+            logger.warning("工具 %s 执行失败: %s", name, e)
             raise ToolError(f"工具 {name} 执行失败: {e}") from e
         finally:
             _current_tool_registry.reset(token)
@@ -141,6 +147,7 @@ class ToolRegistry:
             registry: 技能注册表实例。
         """
         self._skill_registry = registry
+        logger.debug("注入技能注册表: %s", type(registry).__name__)
 
     def get_schemas(self, whitelist: list[str] | None = None) -> list[dict[str, Any]]:
         """返回本轮可用的工具 schema（按白名单过滤）。
@@ -168,6 +175,7 @@ class ToolRegistry:
         )
         if index is not None:
             del self._schemas[index]
+        logger.debug("注销工具: %s", name)
 
 
 # ---- 模块级默认实例（向后兼容） ----
