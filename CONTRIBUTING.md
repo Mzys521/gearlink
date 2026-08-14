@@ -20,7 +20,7 @@ pytest
 
 ## 扩展贡献
 
-四类扩展点（Provider / Tool / Skill / Memory）只允许**新增文件并注册**，不得修改 `core/`，契约见 [docs/架构设计.md §5](docs/架构设计.md)。涉及公共 API 变更的 PR 须同步更新文档与 CHANGELOG。
+四类扩展点（Provider / Tool / Skill / Memory）只允许**新增文件并注册**，不得修改 `core/`，契约见 [docs/架构设计.md §6](docs/架构设计.md)。涉及公共 API 变更的 PR 须同步更新文档与 CHANGELOG。
 
 ## 安全
 

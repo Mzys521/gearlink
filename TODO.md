@@ -1,6 +1,6 @@
 # GearLink 待办清单（开源发布前）
 
-> 依据 `docs/开发规范.md` 与 `docs/接口设计规范.md` 整理。已完成项不再列出。
+> 依据 `docs/开发规范.md` 整理。已完成项不再列出。
 
 ## 已完成（本次整改）
 
@@ -49,7 +49,7 @@
 - [x] `LongTermMemory`：实现 `add_message` / `get_messages` / `clear`（基于 chromadb 向量检索）
 - [x] `MemoryManager`：实现短期 + 长期记忆的组合管理（`add_message` / `build_context` / `end_session` / `clear`），并支持通过 `ReactAgent(memory=...)` 注入
 - [x] `ReactAgent`：`print` 日志替换为标准库 `logging`
-- [x] `skills/`：确定技能扩展契约（渐进式披露设计），并同步 `接口设计规范.md` / `架构设计.md`
+- [x] `skills/`：确定技能扩展契约（渐进式披露设计），并同步 `开发规范.md` / `架构设计.md`
 - [x] `tools/`：将内置工具（如 `get_current_time`）从 `core/tool.py` 迁移到 `tools/`，core 仅保留注册表与调度器（含 `register_tool` 显式注册函数）
 
 ### 数据结构与序列化
@@ -59,7 +59,7 @@
 ### 工程化
 
 - [x] 建立 `examples/` 目录（含记忆对话示例与技能目录示例）
-- [x] 为其余公共 API 补齐可直接运行的示例（接口设计规范 §8；新增自定义 Provider / Memory / 工具 / 事件回调四个免密钥示例）
+- [x] 为其余公共 API 补齐可直接运行的示例（开发规范 §9；新增自定义 Provider / Memory / 工具 / 事件回调四个免密钥示例）
 - [x] CI：GitHub Actions 流水线（`ruff format --check` + `ruff check` + `pytest`）
 - [x] `core/` 测试覆盖率 ≥ 80%（`pytest-cov` 接入，`fail_under = 80` 门禁，当前约 96%）
 
