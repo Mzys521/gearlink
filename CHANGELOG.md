@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- 打包元数据：`pyproject.toml` 补齐 PEP 639 的 `license` / `license-files`、`authors`、`keywords`、`classifiers` 与 `[project.urls]`，`build-system` 升级为 `setuptools>=77`；`python -m build` 可产出 sdist + wheel，为发布 PyPI 就绪。
+
+### Changed
+
+- 日志覆盖补齐：`gearlink/` 全部有副作用的逻辑模块接入标准库 `logging` 模块日志器——本次新增 `core/tool.py`、`core/events.py`、`providers/openai_provider.py`、`providers/anthropic_provider.py`、`providers/ollama_provider.py`、`mcp/client.py`、`tools/builtin.py`、`tools/load_skill.py`，并补全 `core/agent.py` / `core/orchestrator.py` 的编排日志；统一「里程碑 info / 过程 debug / 异常兜底 warning」分级，默认静默、经 `enable_logging()` 输出 stderr；不改变公共 API 与行为。
+
 ## [0.2.0] - 2026-08-13
 
 ### Added

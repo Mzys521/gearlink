@@ -4,6 +4,7 @@ Ollama 在 ``/v1`` 路径暴露 OpenAI 兼容服务，因此 :class:`OllamaProvi
 直接继承 :class:`OpenAIProvider`，仅替换服务地址与默认模型（开发方向 §4.2）。
 """
 
+import logging
 import os
 
 from gearlink.providers.openai_provider import OpenAIProvider
@@ -13,6 +14,8 @@ DEFAULT_BASE_URL = "http://localhost:11434/v1"
 
 #: 默认模型；可按本地实际拉取的模型替换
 DEFAULT_MODEL = "qwen2.5:7b"
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaProvider(OpenAIProvider):
@@ -50,3 +53,4 @@ class OllamaProvider(OpenAIProvider):
             base_url=base_url or os.environ.get("OLLAMA_BASE_URL") or DEFAULT_BASE_URL,
             timeout=timeout,
         )
+        logger.debug("OllamaProvider 初始化: model=%s", self.model)
