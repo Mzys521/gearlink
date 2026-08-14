@@ -11,6 +11,7 @@ Anthropic 的消息与工具调用格式与 OpenAI 差异较大，本模块负�
 """
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -22,6 +23,8 @@ DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
 #: Messages API 必须显式给出单次生成的最大 token 数
 DEFAULT_MAX_TOKENS = 4096
+
+logger = logging.getLogger(__name__)
 
 
 def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -147,6 +150,9 @@ class AnthropicProvider(ModelProvider):
         elif os.environ.get("ANTHROPIC_BASE_URL"):
             client_kwargs["base_url"] = os.environ["ANTHROPIC_BASE_URL"]
         self.client = anthropic.Anthropic(**client_kwargs)
+        logger.debug(
+            "AnthropicProvider 初始化: model=%s, max_tokens=%d", self.model, self.max_tokens
+        )
 
     def _is_retryable(self, error: Exception) -> bool:
         """判断 anthropic SDK 异常是否为可重试的瞬时故障（网络/限流/服务端错误）。"""
@@ -191,11 +197,17 @@ class AnthropicProvider(ModelProvider):
             create_kwargs["system"] = system
         if tools:
             create_kwargs["tools"] = _convert_tools(tools)
+        logger.debug(
+            "模型调用: model=%s, messages=%d, tools=%d",
+            self.model,
+            len(converted_messages),
+            len(tools or []),
+        )
         try:
             response = self.client.messages.create(**create_kwargs)
         except Exception as e:
+            retryable = self._is_retryable(e)
+            logger.warning("模型 %s 调用失败（retryable=%s）: %s", self.model, retryable, e)
             # 包装第三方异常，保留原始异常链；标记可重试性供调用方决策
-            raise ProviderError(
-                f"模型 {self.model} 调用失败: {e}", retryable=self._is_retryable(e)
-            ) from e
+            raise ProviderError(f"模型 {self.model} 调用失败: {e}", retryable=retryable) from e
         return _normalize_response(response)

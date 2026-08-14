@@ -1,8 +1,11 @@
 """内置工具：工具实现与其 JSON Schema 同源定义，显式注册进 core.tool 的注册表。"""
 
+import logging
 from datetime import datetime
 
 from gearlink.core.tool import register_tool
+
+logger = logging.getLogger(__name__)
 
 
 def get_current_time() -> str:
@@ -11,6 +14,7 @@ def get_current_time() -> str:
     Returns:
         当前本地时间的格式化字符串。
     """
+    logger.debug("get_current_time 工具被调用")
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 

@@ -137,6 +137,7 @@ class Orchestrator(Agent):
         self.supervisor._hooks = self._hooks
         for worker in self.workers.values():
             worker._hooks = self._hooks
+        logger.debug("Orchestrator 初始化: 工人=%s, parallel=%s", list(self.workers), self.parallel)
 
     def run_events(self, user_input: str, *, stream: bool = False) -> Iterator[AgentEvent]:
         """执行一次用户请求，逐步产出多 Agent 协作流程的事件（编排的唯一实现）。
@@ -154,7 +155,9 @@ class Orchestrator(Agent):
                 由调用方决定重试策略。
         """
         # 1) 分派：主管把任务拆分并指派给工人（解析失败退化为全员兜底）
+        logger.info("编排开始: stream=%s, 工人数=%d", stream, len(self.workers))
         assignments = self._dispatch(user_input)
+        logger.info("分派完成: %d 个子任务", len(assignments))
 
         seq = 0
         seq = yield from self._emit_event(TeamPlanGeneratedEvent(assignments=assignments), seq)
@@ -164,6 +167,7 @@ class Orchestrator(Agent):
         # 线程池并行执行后按分派序产出事件与完成事件（与并行工具调用惯例一致）。
         results: list[str] = []
         if self.parallel and len(assignments) > 1:
+            logger.debug("并行执行 %d 个子任务", len(assignments))
             for index, assignment in enumerate(assignments):
                 seq = yield from self._emit_event(
                     AgentHandoffEvent(
@@ -184,8 +188,16 @@ class Orchestrator(Agent):
                     SubtaskEndEvent(index=index, worker=assignment["worker"], result=result),
                     seq,
                 )
+                logger.debug(
+                    "子任务 %d/%d 完成: worker=%s（%d 字）",
+                    index + 1,
+                    len(assignments),
+                    assignment["worker"],
+                    len(result),
+                )
         else:
             for index, assignment in enumerate(assignments):
+                logger.debug("派单 %d/%d -> %s", index + 1, len(assignments), assignment["worker"])
                 seq = yield from self._emit_event(
                     AgentHandoffEvent(
                         index=index, worker=assignment["worker"], task=assignment["task"]
@@ -212,10 +224,18 @@ class Orchestrator(Agent):
                     SubtaskEndEvent(index=index, worker=assignment["worker"], result=result),
                     seq,
                 )
+                logger.debug(
+                    "子任务 %d/%d 完成: worker=%s（%d 字）",
+                    index + 1,
+                    len(assignments),
+                    assignment["worker"],
+                    len(result),
+                )
 
         # 3) 汇总：多子任务时整合为最终答案，单子任务直接透传。
         # 单子任务时工人已以 TextDeltaEvent 流出文本，不再重复产出增量。
         if len(assignments) > 1:
+            logger.info("汇总 %d 个子任务结果为最终答案", len(assignments))
             answer = self._synthesize(user_input, assignments, results)
         else:
             answer = results[0]
@@ -237,6 +257,7 @@ class Orchestrator(Agent):
             ProviderError: 主管调用失败时向上传播。
         """
         roster = "\n".join(f"- {name}" for name in self.workers)
+        logger.debug("主管分派调用: 工人 %d 名", len(self.workers))
         response = self.provider.chat(
             messages=[
                 {"role": "system", "content": _DISPATCHER_SYSTEM_PROMPT},
@@ -252,6 +273,7 @@ class Orchestrator(Agent):
         if unknown:
             logger.warning("主管指派了未登记的工人 %s，退化为全员兜底分派", unknown)
             return [{"worker": name, "task": user_input} for name in self.workers]
+        logger.debug("主管分派产出 %d 个子任务", len(assignments))
         return assignments
 
     def _run_worker(self, assignment: dict[str, str], stream: bool) -> tuple[list[AgentEvent], str]:
@@ -266,6 +288,7 @@ class Orchestrator(Agent):
         """
         worker = self.workers.get(assignment["worker"])
         if worker is None:
+            logger.debug("工人 %s 未登记，子任务未执行", assignment["worker"])
             return [], f"工人 {assignment['worker']} 未登记，子任务未执行。"
 
         # 工人事件流可能在线程中产出：经队列转交给主线程按序消费
@@ -298,7 +321,9 @@ class Orchestrator(Agent):
             elif isinstance(item, LoopAbortEvent):
                 answer = item.reason
         thread.join()
-        return events, answer if answer is not None else _MAX_ITERATIONS_FALLBACK
+        result = answer if answer is not None else _MAX_ITERATIONS_FALLBACK
+        logger.debug("工人 %s 完成（%d 字）", assignment["worker"], len(result))
+        return events, result
 
     def _synthesize(
         self, user_input: str, assignments: list[dict[str, str]], results: list[str]
@@ -316,6 +341,7 @@ class Orchestrator(Agent):
         Raises:
             ProviderError: 汇总器调用失败时向上传播。
         """
+        logger.debug("汇总器调用: 子任务数=%d", len(assignments))
         report = "\n".join(
             f"{index + 1}. [{assignment['worker']}] {assignment['task']}\n   结果：{result}"
             for index, (assignment, result) in enumerate(zip(assignments, results))
@@ -329,4 +355,6 @@ class Orchestrator(Agent):
                 },
             ]
         )
-        return response.content or ""
+        answer = response.content or ""
+        logger.debug("汇总器产出最终答案（%d 字）", len(answer))
+        return answer

@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Iterator
 from typing import Any
@@ -10,6 +11,8 @@ from gearlink.providers.base import ModelProvider, ModelResponse, StreamChunk, T
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
+
+logger = logging.getLogger(__name__)
 
 
 def _usage_of(raw: Any) -> TokenUsage | None:
@@ -74,6 +77,12 @@ class OpenAIProvider(ModelProvider):
         if timeout is not None:
             client_kwargs["timeout"] = timeout
         self.client = OpenAI(**client_kwargs)
+        logger.debug(
+            "OpenAIProvider 初始化: model=%s, base_url=%s, timeout=%s",
+            self.model,
+            client_kwargs["base_url"],
+            timeout,
+        )
 
     def chat(
         self,
@@ -105,13 +114,19 @@ class OpenAIProvider(ModelProvider):
         }
         if response_format is not None:
             create_kwargs["response_format"] = response_format
+        logger.debug(
+            "模型调用: model=%s, messages=%d, tools=%d",
+            self.model,
+            len(messages),
+            len(tools or []),
+        )
         try:
             response = self.client.chat.completions.create(**create_kwargs)
         except Exception as e:
+            retryable = _is_retryable(e)
+            logger.warning("模型 %s 调用失败（retryable=%s）: %s", self.model, retryable, e)
             # 包装第三方异常，保留原始异常链；标记可重试性供调用方决策
-            raise ProviderError(
-                f"模型 {self.model} 调用失败: {e}", retryable=_is_retryable(e)
-            ) from e
+            raise ProviderError(f"模型 {self.model} 调用失败: {e}", retryable=retryable) from e
         message = response.choices[0].message
         return ModelResponse(
             content=message.content,
@@ -158,13 +173,19 @@ class OpenAIProvider(ModelProvider):
         }
         if response_format is not None:
             create_kwargs["response_format"] = response_format
+        logger.debug(
+            "模型流式调用: model=%s, messages=%d, tools=%d",
+            self.model,
+            len(messages),
+            len(tools or []),
+        )
         try:
             stream = self.client.chat.completions.create(**create_kwargs)
         except Exception as e:
+            retryable = _is_retryable(e)
+            logger.warning("模型 %s 流式调用失败（retryable=%s）: %s", self.model, retryable, e)
             # 包装第三方异常，保留原始异常链；标记可重试性供调用方决策
-            raise ProviderError(
-                f"模型 {self.model} 流式调用失败: {e}", retryable=_is_retryable(e)
-            ) from e
+            raise ProviderError(f"模型 {self.model} 流式调用失败: {e}", retryable=retryable) from e
 
         content_parts: list[str] = []
         tool_calls_acc: dict[int, dict[str, str]] = {}
@@ -190,9 +211,9 @@ class OpenAIProvider(ModelProvider):
                     if tc_delta.function and tc_delta.function.arguments:
                         acc["arguments"] += tc_delta.function.arguments
         except Exception as e:
-            raise ProviderError(
-                f"模型 {self.model} 流式读取失败: {e}", retryable=_is_retryable(e)
-            ) from e
+            retryable = _is_retryable(e)
+            logger.warning("模型 %s 流式读取失败（retryable=%s）: %s", self.model, retryable, e)
+            raise ProviderError(f"模型 {self.model} 流式读取失败: {e}", retryable=retryable) from e
 
         yield StreamChunk(
             response=ModelResponse(
