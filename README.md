@@ -10,7 +10,7 @@
 ## 特性
 
 - **多策略 Agent**：`Agent` 抽象统一 `run` / `run_stream` / `run_events` 契约；`ReactAgent` 编排 Reason → Act → Observe，工具失败作为可恢复信号写回模型处理；`PlanExecuteAgent` 先规划后执行（规划 → 步骤子循环 → 整合），任务分解更可控；`Orchestrator` 主管-工人多 Agent 协作（主管分派子任务，各工人独立执行后汇总）；
-- **事件流 + 回调**：`run_events` 逐步产出 `AgentEvent` 体系事件，`hooks` / `add_hook` 注入回调实现 on_step 观察与干预；
+- **事件流 + 回调**：`run_events` 逐步产出 `AgentEvent` 体系事件，`hooks` / `add_hook` 注入回调实现 on\_step 观察与干预；
 - **可观测性**：`TokenUsage` 用量透传（`ModelMessageEvent.usage`）、`JsonlEventSink` 事件落盘与离线回放、`UsageTracker` 按标签聚合用量与成本估算；
 - **模型可插拔**：面向 `ModelProvider` 抽象编程，内置 OpenAI 兼容实现（OpenAI / DeepSeek / 国产兼容接口）、本地 `OllamaProvider`（无需密钥）与 `AnthropicProvider`；支持可重试错误的指数退避重试（`max_retries`）与结构化输出（`response_format`）；
 - **记忆可插拔**：短期滑窗 `ShortTermMemory`、向量长期记忆 `LongTermMemory`（可注入自定义 `embedding_function`，存储后端经 `VectorStore` 协议抽象，支持检索阈值过滤与 MMR 去冗余）、以及组合两者的 `MemoryManager`（上下文预算、会话摘要沉淀与动态压缩、用户画像钩子、检索注入）；`snapshot()` / `restore()` 支持会话断线恢复；
@@ -286,39 +286,39 @@ disable_logging()  # 关闭：恢复静默
 所有公共名称均从顶层包 `gearlink` 显式导出（见 `gearlink/__init__.py` 的 `__all__`）。
 各 API 的作用与用法详见 [接口文档](docs/接口文档.md)：
 
-| 分类 | 导出名称 |
-|---|---|
-| Agent | `Agent`、`ReactAgent`、`PlanExecuteAgent`、`Orchestrator` |
-| 事件 | `AgentEvent`、`StepStartEvent`、`TextDeltaEvent`、`ModelMessageEvent`、`ToolCallStartEvent`、`ToolCallEndEvent`、`FinalAnswerEvent`、`LoopAbortEvent`、`PlanGeneratedEvent`、`PlanStepStartEvent`、`PlanStepEndEvent`、`TeamPlanGeneratedEvent`、`AgentHandoffEvent`、`SubtaskEndEvent`、`HookFn` |
-| 记忆 | `Memory`、`MemoryEntry`、`Session`、`ShortTermMemory`、`LongTermMemory`、`MemoryManager`、`EmbeddingFn`、`ProfileHookFn`、`VectorStore`、`ChromaVectorStore`、`ContextBuilder` |
-| 工具 | `TOOL_REGISTRY`、`TOOL_SCHEMAS`、`ToolRegistry`、`register_tool`、`call_tool`、`build_tool_schema`、`set_skill_registry` |
-| 模型 | `ModelProvider`、`ModelResponse`、`StreamChunk`、`ToolCall`、`OpenAIProvider`、`OllamaProvider`、`AnthropicProvider` |
-| MCP | `McpClient` |
-| 技能 | `Skill`、`SkillRegistry`、`SkillLoader` |
-| 可观测性 | `TokenUsage`、`UsageTracker`、`UsageRecord`、`JsonlEventSink`、`jsonl_hook`、`load_jsonl_events` |
-| 异常 | `GearLinkError`、`ProviderError`、`ToolError`、`ToolNotFoundError`、`MemoryError`、`SkillError`、`SkillNotFoundError`、`SkillLoadError`、`SkillValidationError`、`SkillExecutionError` |
-| 日志 | `enable_logging`、`disable_logging` |
-| 工具函数 | `estimate_tokens`、`count_message_tokens` |
+| 分类    | 导出名称                                                                                                                                                                                                                                                                                |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent | `Agent`、`ReactAgent`、`PlanExecuteAgent`、`Orchestrator`                                                                                                                                                                                                                              |
+| 事件    | `AgentEvent`、`StepStartEvent`、`TextDeltaEvent`、`ModelMessageEvent`、`ToolCallStartEvent`、`ToolCallEndEvent`、`FinalAnswerEvent`、`LoopAbortEvent`、`PlanGeneratedEvent`、`PlanStepStartEvent`、`PlanStepEndEvent`、`TeamPlanGeneratedEvent`、`AgentHandoffEvent`、`SubtaskEndEvent`、`HookFn` |
+| 记忆    | `Memory`、`MemoryEntry`、`Session`、`ShortTermMemory`、`LongTermMemory`、`MemoryManager`、`EmbeddingFn`、`ProfileHookFn`、`VectorStore`、`ChromaVectorStore`、`ContextBuilder`                                                                                                                |
+| 工具    | `TOOL_REGISTRY`、`TOOL_SCHEMAS`、`ToolRegistry`、`register_tool`、`call_tool`、`build_tool_schema`、`set_skill_registry`                                                                                                                                                                  |
+| 模型    | `ModelProvider`、`ModelResponse`、`StreamChunk`、`ToolCall`、`OpenAIProvider`、`OllamaProvider`、`AnthropicProvider`                                                                                                                                                                      |
+| MCP   | `McpClient`                                                                                                                                                                                                                                                                         |
+| 技能    | `Skill`、`SkillRegistry`、`SkillLoader`                                                                                                                                                                                                                                               |
+| 可观测性  | `TokenUsage`、`UsageTracker`、`UsageRecord`、`JsonlEventSink`、`jsonl_hook`、`load_jsonl_events`                                                                                                                                                                                         |
+| 异常    | `GearLinkError`、`ProviderError`、`ToolError`、`ToolNotFoundError`、`MemoryError`、`SkillError`、`SkillNotFoundError`、`SkillLoadError`、`SkillValidationError`、`SkillExecutionError`                                                                                                       |
+| 日志    | `enable_logging`、`disable_logging`                                                                                                                                                                                                                                                  |
+| 工具函数  | `estimate_tokens`、`count_message_tokens`                                                                                                                                                                                                                                            |
 
 ## 示例
 
 标注「免密钥」的示例内置了无网络 Provider，无需配置 API key 即可直接运行，适合初次体验：
 
-- [examples/custom_provider_demo.py](examples/custom_provider_demo.py)：自定义 `ModelProvider`（免密钥）；
-- [examples/custom_memory_demo.py](examples/custom_memory_demo.py)：自定义 `Memory` 实现并注入 Agent（免密钥）；
-- [examples/event_hooks_demo.py](examples/event_hooks_demo.py)：`run_events` 事件流消费 + `add_hook` 观察/替换回调（免密钥）；
-- [examples/custom_tool_demo.py](examples/custom_tool_demo.py)：`register_tool` 注册自定义工具 + `call_tool` 调度与错误兜底（免密钥；配 key 后联动 Agent）；
-- [examples/session_restore_demo.py](examples/session_restore_demo.py)：会话 `snapshot` / `restore` 断线恢复（免密钥）；
-- [examples/observability_demo.py](examples/observability_demo.py)：token 用量透传 + JSONL 事件落盘回放 + `UsageTracker` 成本估算（免密钥）；
-- [examples/memory_advanced_demo.py](examples/memory_advanced_demo.py)：上下文摘要压缩 + 用户画像 + 检索阈值/MMR + 自定义 `VectorStore`（免密钥，无需 chromadb）；
-- [examples/orchestrator_demo.py](examples/orchestrator_demo.py)：`Orchestrator` 主管-工人多 Agent 协作（免密钥）；
-- [examples/ollama_local_demo.py](examples/ollama_local_demo.py)：`OllamaProvider` 本地模型（无需 API key，需本地 Ollama 服务）；
-- [examples/anthropic_demo.py](examples/anthropic_demo.py)：`AnthropicProvider` 接入 Claude（需 `gearlink[anthropic]` 与密钥）；
-- [examples/mcp_client_demo.py](examples/mcp_client_demo.py)：`McpClient` 消费外部 MCP 服务器工具（需 `gearlink[mcp]`）；
-- [examples/memory_chatbot.py](examples/memory_chatbot.py)：短期 + 长期记忆 + 会话摘要的对话助手；
-- [examples/streaming_demo.py](examples/streaming_demo.py)：`run_stream` 流式输出（含工具调用阶段）；
-- [examples/plan_execute_demo.py](examples/plan_execute_demo.py)：`PlanExecuteAgent` 规划-执行（含事件回调观察）；
-- [examples/skill_demo/](examples/skill_demo/)：技能目录结构示例（每个技能一个含 `SKILL.md` 的子目录）。
+- [examples/custom\_provider\_demo.py](examples/custom_provider_demo.py)：自定义 `ModelProvider`（免密钥）；
+- [examples/custom\_memory\_demo.py](examples/custom_memory_demo.py)：自定义 `Memory` 实现并注入 Agent（免密钥）；
+- [examples/event\_hooks\_demo.py](examples/event_hooks_demo.py)：`run_events` 事件流消费 + `add_hook` 观察/替换回调（免密钥）；
+- [examples/custom\_tool\_demo.py](examples/custom_tool_demo.py)：`register_tool` 注册自定义工具 + `call_tool` 调度与错误兜底（免密钥；配 key 后联动 Agent）；
+- [examples/session\_restore\_demo.py](examples/session_restore_demo.py)：会话 `snapshot` / `restore` 断线恢复（免密钥）；
+- [examples/observability\_demo.py](examples/observability_demo.py)：token 用量透传 + JSONL 事件落盘回放 + `UsageTracker` 成本估算（免密钥）；
+- [examples/memory\_advanced\_demo.py](examples/memory_advanced_demo.py)：上下文摘要压缩 + 用户画像 + 检索阈值/MMR + 自定义 `VectorStore`（免密钥，无需 chromadb）；
+- [examples/orchestrator\_demo.py](examples/orchestrator_demo.py)：`Orchestrator` 主管-工人多 Agent 协作（免密钥）；
+- [examples/ollama\_local\_demo.py](examples/ollama_local_demo.py)：`OllamaProvider` 本地模型（无需 API key，需本地 Ollama 服务）；
+- [examples/anthropic\_demo.py](examples/anthropic_demo.py)：`AnthropicProvider` 接入 Claude（需 `gearlink[anthropic]` 与密钥）；
+- [examples/mcp\_client\_demo.py](examples/mcp_client_demo.py)：`McpClient` 消费外部 MCP 服务器工具（需 `gearlink[mcp]`）；
+- [examples/memory\_chatbot.py](examples/memory_chatbot.py)：短期 + 长期记忆 + 会话摘要的对话助手；
+- [examples/streaming\_demo.py](examples/streaming_demo.py)：`run_stream` 流式输出（含工具调用阶段）；
+- [examples/plan\_execute\_demo.py](examples/plan_execute_demo.py)：`PlanExecuteAgent` 规划-执行（含事件回调观察）；
+- [examples/skill\_demo/](examples/skill_demo/)：技能目录结构示例（每个技能一个含 `SKILL.md` 的子目录）。
 
 ## 文档
 
@@ -326,7 +326,7 @@ disable_logging()  # 关闭：恢复静默
 - [架构设计](docs/架构设计.md)：分层架构、核心组件、运行时数据流与四类扩展点契约
 - [接口文档](docs/接口文档.md)：每个公共 API 的作用与用法说明
 - [开发规范](docs/开发规范.md)：开发流程、代码规范与 API 设计原则
-- [开发方向](docs/开发方向.md)：分优先级（P0~P3）的路线图与里程碑
+- [开发方向](docs/开发方向.md)：分优先级（P0\~P3）的路线图与里程碑
 
 ## 开发
 
