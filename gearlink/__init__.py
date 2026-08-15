@@ -4,7 +4,8 @@
 
 - Agent：`Agent`（编排策略抽象）/ `ReactAgent`（ReAct）/ `PlanExecuteAgent`（规划-执行）/
   `Orchestrator`（多 Agent 协作主管-工人编排）/
-  `DependentOrchestrator`（依赖编排，工人间流水线协作）；
+  `DependentOrchestrator`（依赖编排，工人间流水线协作）/
+  `AutonomousOrchestrator`（模型自主 DAG 编排，串并行混合）；
   `run_events` 事件流含 `AgentEvent` 体系与 `HookFn` 回调；
 - 记忆：`Memory` / `MemoryEntry` / `Session` / `ShortTermMemory` /
   `LongTermMemory` / `MemoryManager` / `VectorStore` / `ChromaVectorStore`；
@@ -41,7 +42,7 @@ from gearlink.core.events import (
     jsonl_hook,
     load_jsonl_events,
 )
-from gearlink.core.orchestrator import DependentOrchestrator, Orchestrator
+from gearlink.core.orchestrator import AutonomousOrchestrator, DependentOrchestrator, Orchestrator
 from gearlink.core.memory import (
     ChromaVectorStore,
     ContextBuilder,
@@ -112,6 +113,7 @@ __all__ = [
     "PlanStepEndEvent",
     "Orchestrator",
     "DependentOrchestrator",
+    "AutonomousOrchestrator",
     "TeamPlanGeneratedEvent",
     "AgentHandoffEvent",
     "SubtaskEndEvent",

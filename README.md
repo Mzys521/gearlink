@@ -9,7 +9,7 @@
 
 ## 特性
 
-- **多策略 Agent**：`Agent` 抽象统一 `run` / `run_stream` / `run_events` 契约；`ReactAgent` 编排 Reason → Act → Observe，工具失败作为可恢复信号写回模型处理；`PlanExecuteAgent` 先规划后执行（规划 → 步骤子循环 → 整合），任务分解更可控；`Orchestrator` 主管-工人多 Agent 协作（主管分派子任务，各工人独立执行后汇总）；`DependentOrchestrator` 依赖编排（工人间流水线协作，上游结果自动注入下游）；
+- **多策略 Agent**：`Agent` 抽象统一 `run` / `run_stream` / `run_events` 契约；`ReactAgent` 编排 Reason → Act → Observe，工具失败作为可恢复信号写回模型处理；`PlanExecuteAgent` 先规划后执行（规划 → 步骤子循环 → 整合），任务分解更可控；`Orchestrator` 主管-工人多 Agent 协作（主管分派子任务，各工人独立执行后汇总）；`DependentOrchestrator` 依赖编排（工人间流水线协作，上游结果自动注入下游）；`AutonomousOrchestrator` 模型自主编排（主管自主产出 DAG 计划，串并行混合执行，上游结果按依赖边注入下游）；
 - **事件流 + 回调**：`run_events` 逐步产出 `AgentEvent` 体系事件，`hooks` / `add_hook` 注入回调实现 on\_step 观察与干预；
 - **可观测性**：`TokenUsage` 用量透传（`ModelMessageEvent.usage`）、`JsonlEventSink` 事件落盘与离线回放、`UsageTracker` 按标签聚合用量与成本估算；
 - **模型可插拔**：面向 `ModelProvider` 抽象编程，内置 OpenAI 兼容实现（OpenAI / DeepSeek / 国产兼容接口）、本地 `OllamaProvider`（无需密钥）与 `AnthropicProvider`；支持可重试错误的指数退避重试（`max_retries`）与结构化输出（`response_format`）；
@@ -204,6 +204,35 @@ print(orchestrator.run("写一篇近期新闻"))
 `dependencies=None` 时行为与 `Orchestrator` 完全一致；依赖引用未登记工人或存在
 循环时构造抛 `GearLinkError`；上游未收敛时结果以兜底文案注入，不中断编排。
 
+### 自主编排（AutonomousOrchestrator）
+
+想让主管模型**按任务内容自主决定**拆分、指派与串/并行策略（无需构造时静态
+声明依赖），用 `AutonomousOrchestrator`：主管每次请求自主产出 DAG 计划
+（节点为子任务、边为数据依赖），框架编译为拓扑分层混合串并行执行——无依赖
+子任务并行、有依赖子任务按先后顺序执行，下游开始前全部直接上游结果已按依赖边
+汇总注入其任务文本：
+
+```python
+from gearlink import AutonomousOrchestrator, OpenAIProvider, ReactAgent
+
+orchestrator = AutonomousOrchestrator(
+    supervisor=ReactAgent(provider=OpenAIProvider()),
+    workers={
+        "market_researcher": ReactAgent(provider=OpenAIProvider()),
+        "tech_researcher": ReactAgent(provider=OpenAIProvider()),
+        "writer": ReactAgent(provider=OpenAIProvider()),
+    },
+    parallel=True,  # 默认：同层并行、层间串行；False 时全串行
+)
+print(orchestrator.run("出一份 GearLink 的产品分析报告"))
+```
+
+计划非法（解析失败、引用未登记工人、缺失依赖或成环）时记录日志并降级为
+「把原任务派给全部工人」，不中断编排。事件流新增可选字段：`TeamPlanGeneratedEvent.graph`
+（DAG 计划）/ `.parallel_groups`（拓扑分层），`AgentHandoffEvent.layer` / `.upstream`，
+`SubtaskEndEvent.layer`（均默认 `None`，不影响现有编排器行为）。
+完整演示见 `examples/autonomous_orchestrator_demo.py`（免密钥）。
+
 ### 更多模型提供者
 
 Provider 可插拔：换提供者不改变其余任何用法。
@@ -340,6 +369,7 @@ disable_logging()  # 关闭：恢复静默
 - [examples/memory\_advanced\_demo.py](examples/memory_advanced_demo.py)：上下文摘要压缩 + 用户画像 + 检索阈值/MMR + 自定义 `VectorStore`（免密钥，无需 chromadb）；
 - [examples/orchestrator\_demo.py](examples/orchestrator_demo.py)：`Orchestrator` 主管-工人多 Agent 协作（免密钥）；
 - [examples/dependent\_orchestrator\_demo.py](examples/dependent_orchestrator_demo.py)：`DependentOrchestrator` 工人依赖流水线编排（免密钥）；
+- [examples/autonomous\_orchestrator\_demo.py](examples/autonomous_orchestrator_demo.py)：`AutonomousOrchestrator` 模型自主 DAG 串并行编排（免密钥）；
 - [examples/ollama\_local\_demo.py](examples/ollama_local_demo.py)：`OllamaProvider` 本地模型（无需 API key，需本地 Ollama 服务）；
 - [examples/anthropic\_demo.py](examples/anthropic_demo.py)：`AnthropicProvider` 接入 Claude（需 `gearlink[anthropic]` 与密钥）；
 - [examples/mcp\_client\_demo.py](examples/mcp_client_demo.py)：`McpClient` 消费外部 MCP 服务器工具（需 `gearlink[mcp]`）；
