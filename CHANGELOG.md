@@ -5,7 +5,20 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.4.0] - 2026-08-15
+
+### Added
+
+- 模型自主编排：
+  - `AutonomousOrchestrator`：`Orchestrator` 纯新增子类，主管模型每次请求自主产出 DAG 编排计划（`{"nodes": [{"id", "worker", "task"}], "edges": [{"from", "to"}]}`，节点为子任务、边为数据依赖），自主决定拆分、指派与串/并行策略；计划编译为节点级 Kahn 拓扑分层混合串并行执行（`parallel=True` 默认：层内并行、层间串行），同一工人多节点按声明顺序串行；下游任务执行前全部直接上游结果按依赖边汇总、按上游工人名分组以 `[上游结果]` 报告段落注入（层屏障保证消息同步）；计划解析失败/引用未登记工人/缺失依赖/成环时记录日志并降级为全员兜底分派；兼容主管输出旧分派格式（纯数组按序解释为串行链）；
+  - 事件新增可选字段（均默认 `None`，向后兼容）：`TeamPlanGeneratedEvent.graph`（DAG 计划）/ `.parallel_groups`（拓扑分层），`AgentHandoffEvent.layer` / `.upstream`（直接上游子任务下标），`SubtaskEndEvent.layer`；兜底降级时不携带这些字段；
+  - 新增 `examples/autonomous_orchestrator_demo.py`（免密钥）与 `tests/test_autonomous_orchestrator.py`（18 用例）；`docs/架构设计.md` / `docs/使用教程.md` / `docs/接口文档.md` / `docs/开发方向.md` / `README.md` 同步更新。
+
+### 兼容性说明
+
+- 纯新增能力：`Orchestrator` / `DependentOrchestrator` 的外部行为、事件序列与既有测试语义均不变，无需迁移；
+- 事件新增字段序列化后为 `null`，旧版 JSONL 回放代码按字段缺失处理即可；
+- `AutonomousOrchestrator` 默认 `parallel=True`（层内并行），要求工人自身及其工具线程安全；如需全串行传 `parallel=False`。
 
 ## [0.3.0] - 2026-08-14
 

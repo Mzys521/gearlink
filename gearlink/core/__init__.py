@@ -17,7 +17,7 @@ from gearlink.core.memory import (
     ShortTermMemory,
     VectorStore,
 )
-from gearlink.core.orchestrator import DependentOrchestrator, Orchestrator
+from gearlink.core.orchestrator import AutonomousOrchestrator, DependentOrchestrator, Orchestrator
 from gearlink.core.tool import (
     TOOL_REGISTRY,
     TOOL_SCHEMAS,
@@ -44,6 +44,7 @@ __all__ = [
     "ContextBuilder",
     "Orchestrator",
     "DependentOrchestrator",
+    "AutonomousOrchestrator",
     "AgentHandoffEvent",
     "SubtaskEndEvent",
     "TeamPlanGeneratedEvent",

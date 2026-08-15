@@ -207,10 +207,16 @@ class TeamPlanGeneratedEvent(AgentEvent):
         assignments: 子任务分派列表，每项为 {"worker": 工人名, "task": 子任务指令}。
         dependencies: 工人依赖声明（worker 名 → 其依赖的上游 worker 名列表）；
             仅依赖编排（DependentOrchestrator）产出，默认 None。
+        graph: 主管自主产出的 DAG 编排计划（{"nodes": ..., "edges": ...}）；
+            仅自主编排（AutonomousOrchestrator）解析成功时产出，默认 None。
+        parallel_groups: 拓扑分层的执行计划（每层为 assignment 下标列表，
+            层内可并行、层间串行）；仅自主编排产出，默认 None。
     """
 
     assignments: list[dict[str, str]] = field(default_factory=list)
     dependencies: dict[str, list[str]] | None = None
+    graph: dict[str, Any] | None = None
+    parallel_groups: list[list[int]] | None = None
     type: str = "team_plan_generated"
 
 
@@ -222,11 +228,16 @@ class AgentHandoffEvent(AgentEvent):
         index: 子任务序号（从 0 开始，与分派清单下标对应）。
         worker: 接收任务的工人名称。
         task: 派给工人的子任务指令文本。
+        layer: 该子任务所在的拓扑分层（从 0 开始）；仅自主编排产出，默认 None。
+        upstream: 直接上游子任务的下标列表（消息同步来源）；
+            仅自主编排产出，默认 None。
     """
 
     index: int = 0
     worker: str = ""
     task: str = ""
+    layer: int | None = None
+    upstream: list[int] | None = None
     type: str = "agent_handoff"
 
 
@@ -238,11 +249,13 @@ class SubtaskEndEvent(AgentEvent):
         index: 子任务序号（从 0 开始，与分派清单下标对应）。
         worker: 执行该子任务的工人名称。
         result: 工人给出的结果文本。
+        layer: 该子任务所在的拓扑分层（从 0 开始）；仅自主编排产出，默认 None。
     """
 
     index: int = 0
     worker: str = ""
     result: str = ""
+    layer: int | None = None
     type: str = "subtask_end"
 
 
