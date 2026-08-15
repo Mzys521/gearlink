@@ -67,9 +67,7 @@ SUMMARY = "产品分析报告：GearLink 以轻量级事件流契约与可插拔
 def main() -> None:
     # 主管：第一次调用产出 DAG 计划（JSON），第二次调用产出汇总答案；
     # 后两条为下方 run 一行式调用的重复规划与汇总（脚本提供者按序消耗）
-    supervisor = ReactAgent(
-        provider=ScriptedProvider([GRAPH_PLAN, SUMMARY, GRAPH_PLAN, SUMMARY])
-    )
+    supervisor = ReactAgent(provider=ScriptedProvider([GRAPH_PLAN, SUMMARY, GRAPH_PLAN, SUMMARY]))
 
     # 工人：各自独立的 ReactAgent（真实场景可配不同 provider / 工具 / 记忆）
     workers = {

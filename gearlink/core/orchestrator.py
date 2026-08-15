@@ -852,9 +852,7 @@ class AutonomousOrchestrator(Orchestrator):
 
         seq = 0
         seq = yield from self._emit_event(
-            TeamPlanGeneratedEvent(
-                assignments=assignments, graph=graph, parallel_groups=groups
-            ),
+            TeamPlanGeneratedEvent(assignments=assignments, graph=graph, parallel_groups=groups),
             seq,
         )
 
