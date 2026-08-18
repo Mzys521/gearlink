@@ -5,6 +5,18 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+## [0.4.1] - 2026-08-15
+
+### Changed
+
+- `core/orchestrator.py` 代码逻辑去重：`Orchestrator` / `DependentOrchestrator` / `AutonomousOrchestrator` 三者共享的串并行执行与汇总逻辑统一抽取，减少冗余代码约 330 行重构。
+- `docs/架构设计.md` 更新：补充 `AutonomousOrchestrator` 架构说明与时序图。
+- `docs/开发方向.md` 更新：标记已完成项，精简待办清单。
+- `TODO.md` 精简：已完成项归档，保留未完成待办。
+- 新增 `docs/README.md`：文档总览索引。
+
 ## [0.4.0] - 2026-08-15
 
 ### Added
