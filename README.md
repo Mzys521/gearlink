@@ -344,7 +344,7 @@ disable_logging()  # 关闭：恢复静默
 
 | 分类    | 导出名称                                                                                                                                                                                                                                                                                |
 | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent | `Agent`、`ReactAgent`、`PlanExecuteAgent`、`Orchestrator`、`DependentOrchestrator`                                                                                                                                                                                                                              |
+| Agent | `Agent`、`ReactAgent`、`PlanExecuteAgent`、`Orchestrator`、`DependentOrchestrator`、`AutonomousOrchestrator`                                                                                                                                                                                                     |
 | 事件    | `AgentEvent`、`StepStartEvent`、`TextDeltaEvent`、`ModelMessageEvent`、`ToolCallStartEvent`、`ToolCallEndEvent`、`FinalAnswerEvent`、`LoopAbortEvent`、`PlanGeneratedEvent`、`PlanStepStartEvent`、`PlanStepEndEvent`、`TeamPlanGeneratedEvent`、`AgentHandoffEvent`、`SubtaskEndEvent`、`HookFn` |
 | 记忆    | `Memory`、`MemoryEntry`、`Session`、`ShortTermMemory`、`LongTermMemory`、`MemoryManager`、`EmbeddingFn`、`ProfileHookFn`、`VectorStore`、`ChromaVectorStore`、`ContextBuilder`                                                                                                                |
 | 工具    | `TOOL_REGISTRY`、`TOOL_SCHEMAS`、`ToolRegistry`、`register_tool`、`call_tool`、`build_tool_schema`、`set_skill_registry`                                                                                                                                                                  |
@@ -380,6 +380,7 @@ disable_logging()  # 关闭：恢复静默
 
 ## 文档
 
+- [文档中心](docs/README.md)：按概览、设置、架构、数据模型、API 与治理组织的统一入口
 - [使用教程](docs/使用教程.md)：从安装到进阶的完整新手教程
 - [架构设计](docs/架构设计.md)：分层架构、核心组件、运行时数据流与四类扩展点契约
 - [接口文档](docs/接口文档.md)：每个公共 API 的作用与用法说明
