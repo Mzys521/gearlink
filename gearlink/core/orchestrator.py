@@ -20,7 +20,7 @@ Orchestrator 是多角色分工（可并行），二者互补。
 import logging
 import queue
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -179,86 +179,13 @@ class Orchestrator(Agent):
         seq = 0
         seq = yield from self._emit_event(TeamPlanGeneratedEvent(assignments=assignments), seq)
 
-        # 2) 执行：各工人独立完成子任务，转发事件并统一编号。
-        # 串行：逐个「派单 → 实时转发事件 → 完成」；并行：先全部派单，
-        # 线程池并行执行后按分派序产出事件与完成事件（与并行工具调用惯例一致）。
-        results: list[str] = []
-        if self.parallel and len(assignments) > 1:
-            logger.debug("并行执行 %d 个子任务", len(assignments))
-            for index, assignment in enumerate(assignments):
-                seq = yield from self._emit_event(
-                    AgentHandoffEvent(
-                        index=index, worker=assignment["worker"], task=assignment["task"]
-                    ),
-                    seq,
-                )
-            with ThreadPoolExecutor(max_workers=len(assignments)) as pool:
-                outcomes = list(pool.map(lambda a: self._run_worker(a, stream), assignments))
-            for index, assignment in enumerate(assignments):
-                worker_events, result = outcomes[index]
-                for sub_event in worker_events:
-                    sub_event.seq = seq
-                    seq += 1
-                    yield sub_event
-                results.append(result)
-                seq = yield from self._emit_event(
-                    SubtaskEndEvent(index=index, worker=assignment["worker"], result=result),
-                    seq,
-                )
-                logger.debug(
-                    "子任务 %d/%d 完成: worker=%s（%d 字）",
-                    index + 1,
-                    len(assignments),
-                    assignment["worker"],
-                    len(result),
-                )
-        else:
-            for index, assignment in enumerate(assignments):
-                logger.debug("派单 %d/%d -> %s", index + 1, len(assignments), assignment["worker"])
-                seq = yield from self._emit_event(
-                    AgentHandoffEvent(
-                        index=index, worker=assignment["worker"], task=assignment["task"]
-                    ),
-                    seq,
-                )
-                result: str | None = None
-                worker = self.workers.get(assignment["worker"])
-                if worker is None:
-                    result = f"工人 {assignment['worker']} 未登记，子任务未执行。"
-                else:
-                    for sub_event in worker.run_events(assignment["task"], stream=stream):
-                        sub_event.seq = seq
-                        seq += 1
-                        if isinstance(sub_event, FinalAnswerEvent):
-                            result = sub_event.content
-                        elif isinstance(sub_event, LoopAbortEvent):
-                            result = sub_event.reason
-                        yield sub_event
-                if result is None:
-                    result = _MAX_ITERATIONS_FALLBACK
-                results.append(result)
-                seq = yield from self._emit_event(
-                    SubtaskEndEvent(index=index, worker=assignment["worker"], result=result),
-                    seq,
-                )
-                logger.debug(
-                    "子任务 %d/%d 完成: worker=%s（%d 字）",
-                    index + 1,
-                    len(assignments),
-                    assignment["worker"],
-                    len(result),
-                )
+        # 2) 执行：公共模板负责派单、串并行执行、事件重编号与结果提取。
+        items = [dict(assignment, index=index) for index, assignment in enumerate(assignments)]
+        seq, results_by_index = yield from self._execute_batch(items, stream, seq)
 
-        # 3) 汇总：多子任务时整合为最终答案，单子任务直接透传。
-        # 单子任务时工人已以 TextDeltaEvent 流出文本，不再重复产出增量。
-        if len(assignments) > 1:
-            logger.info("汇总 %d 个子任务结果为最终答案", len(assignments))
-            answer = self._synthesize(user_input, assignments, results)
-        else:
-            answer = results[0]
-        if stream and len(assignments) > 1:
-            seq = yield from self._emit_event(TextDeltaEvent(delta=answer), seq)
-        yield from self._emit_event(FinalAnswerEvent(content=answer), seq)
+        # 3) 汇总：公共模板按原始分派顺序汇总并产出最终事件。
+        results = [results_by_index[index] for index in range(len(assignments))]
+        yield from self._finalize_results(user_input, assignments, results, stream, seq)
 
     def _dispatch(self, user_input: str) -> list[dict[str, str]]:
         """分派：主管把任务拆分为子任务并指派给工人。
@@ -341,6 +268,107 @@ class Orchestrator(Agent):
         result = answer if answer is not None else _MAX_ITERATIONS_FALLBACK
         logger.debug("工人 %s 完成（%d 字）", assignment["worker"], len(result))
         return events, result
+
+    @staticmethod
+    def _handoff_event(item: dict[str, Any]) -> AgentHandoffEvent:
+        """由标准化执行项构造派单事件，并透传自主编排元数据。"""
+        return AgentHandoffEvent(
+            index=item["index"],
+            worker=item["worker"],
+            task=item["task"],
+            layer=item.get("layer"),
+            upstream=item.get("upstream"),
+        )
+
+    @staticmethod
+    def _subtask_end_event(item: dict[str, Any], result: str) -> SubtaskEndEvent:
+        """由标准化执行项构造完成事件，并透传自主编排元数据。"""
+        return SubtaskEndEvent(
+            index=item["index"],
+            worker=item["worker"],
+            result=result,
+            layer=item.get("layer"),
+        )
+
+    def _stream_worker(
+        self, item: dict[str, Any], stream: bool, seq: int
+    ) -> Generator[AgentEvent, None, tuple[int, str]]:
+        """串行执行一个工人任务，实时转发事件并提取收敛结果。"""
+        worker = self.workers.get(item["worker"])
+        if worker is None:
+            return seq, f"工人 {item['worker']} 未登记，子任务未执行。"
+
+        result: str | None = None
+        for sub_event in worker.run_events(item["task"], stream=stream):
+            sub_event.seq = seq
+            seq += 1
+            if isinstance(sub_event, FinalAnswerEvent):
+                result = sub_event.content
+            elif isinstance(sub_event, LoopAbortEvent):
+                result = sub_event.reason
+            yield sub_event
+        return seq, result if result is not None else _MAX_ITERATIONS_FALLBACK
+
+    @staticmethod
+    def _forward_worker_events(
+        events: list[AgentEvent], seq: int
+    ) -> Generator[AgentEvent, None, int]:
+        """按主编排事件序列重新编号并转发已收集的工人事件。"""
+        for event in events:
+            event.seq = seq
+            seq += 1
+            yield event
+        return seq
+
+    def _execute_batch(
+        self, items: list[dict[str, Any]], stream: bool, seq: int
+    ) -> Generator[AgentEvent, None, tuple[int, dict[int, str]]]:
+        """执行同一调度批次，统一串并行语义、事件顺序与结果兜底。
+
+        每个执行项必须包含 ``index``、``worker`` 与 ``task``；自主编排可额外
+        携带 ``layer`` / ``upstream``。并行批次先产出全部派单事件，再按输入
+        顺序转发结果；串行批次保持工人事件实时产出。
+        """
+        results: dict[int, str] = {}
+        run_parallel = self.parallel and len(items) > 1
+
+        if run_parallel:
+            logger.debug("并行执行 %d 个子任务", len(items))
+            for item in items:
+                seq = yield from self._emit_event(self._handoff_event(item), seq)
+            assignments = [{"worker": item["worker"], "task": item["task"]} for item in items]
+            with ThreadPoolExecutor(max_workers=len(items)) as pool:
+                outcomes = list(pool.map(lambda a: self._run_worker(a, stream), assignments))
+            for item, (worker_events, result) in zip(items, outcomes):
+                seq = yield from self._forward_worker_events(worker_events, seq)
+                results[item["index"]] = result
+                seq = yield from self._emit_event(self._subtask_end_event(item, result), seq)
+        else:
+            for item in items:
+                seq = yield from self._emit_event(self._handoff_event(item), seq)
+                seq, result = yield from self._stream_worker(item, stream, seq)
+                results[item["index"]] = result
+                seq = yield from self._emit_event(self._subtask_end_event(item, result), seq)
+
+        return seq, results
+
+    def _finalize_results(
+        self,
+        user_input: str,
+        assignments: list[dict[str, str]],
+        results: list[str],
+        stream: bool,
+        seq: int,
+    ) -> Generator[AgentEvent, None, None]:
+        """统一单结果透传、多结果汇总及最终事件产出。"""
+        if len(assignments) > 1:
+            logger.info("汇总 %d 个子任务结果为最终答案", len(assignments))
+            answer = self._synthesize(user_input, assignments, results)
+        else:
+            answer = results[0]
+        if stream and len(assignments) > 1:
+            seq = yield from self._emit_event(TextDeltaEvent(delta=answer), seq)
+        yield from self._emit_event(FinalAnswerEvent(content=answer), seq)
 
     def _synthesize(
         self, user_input: str, assignments: list[dict[str, str]], results: list[str]
@@ -532,69 +560,15 @@ class DependentOrchestrator(Orchestrator):
                     }
                 )
 
-            if self.parallel and len(injected) > 1:
-                for item in injected:
-                    seq = yield from self._emit_event(
-                        AgentHandoffEvent(
-                            index=item["index"], worker=item["worker"], task=item["task"]
-                        ),
-                        seq,
-                    )
-                runnable = [{"worker": item["worker"], "task": item["task"]} for item in injected]
-                with ThreadPoolExecutor(max_workers=len(injected)) as pool:
-                    outcomes = list(pool.map(lambda a: self._run_worker(a, stream), runnable))
-                for item, (worker_events, result) in zip(injected, outcomes):
-                    for sub_event in worker_events:
-                        sub_event.seq = seq
-                        seq += 1
-                        yield sub_event
-                    results_by_index[item["index"]] = result
-                    executed.setdefault(item["worker"], []).append(result)
-                    seq = yield from self._emit_event(
-                        SubtaskEndEvent(index=item["index"], worker=item["worker"], result=result),
-                        seq,
-                    )
-            else:
-                for item in injected:
-                    seq = yield from self._emit_event(
-                        AgentHandoffEvent(
-                            index=item["index"], worker=item["worker"], task=item["task"]
-                        ),
-                        seq,
-                    )
-                    result: str | None = None
-                    worker = self.workers.get(item["worker"])
-                    if worker is None:
-                        result = f"工人 {item['worker']} 未登记，子任务未执行。"
-                    else:
-                        for sub_event in worker.run_events(item["task"], stream=stream):
-                            sub_event.seq = seq
-                            seq += 1
-                            if isinstance(sub_event, FinalAnswerEvent):
-                                result = sub_event.content
-                            elif isinstance(sub_event, LoopAbortEvent):
-                                result = sub_event.reason
-                            yield sub_event
-                    if result is None:
-                        result = _MAX_ITERATIONS_FALLBACK
-                    results_by_index[item["index"]] = result
-                    executed.setdefault(item["worker"], []).append(result)
-                    seq = yield from self._emit_event(
-                        SubtaskEndEvent(index=item["index"], worker=item["worker"], result=result),
-                        seq,
-                    )
+            seq, layer_results = yield from self._execute_batch(injected, stream, seq)
+            results_by_index.update(layer_results)
+            for item in injected:
+                executed.setdefault(item["worker"], []).append(layer_results[item["index"]])
 
         # 3) 汇总：按分派清单原始顺序重组结果；多子任务时整合为最终答案，
         # 单子任务直接透传（工人已流出文本，不再重复产出增量）。
         results = [results_by_index[index] for index in range(len(assignments))]
-        if len(assignments) > 1:
-            logger.info("汇总 %d 个子任务结果为最终答案", len(assignments))
-            answer = self._synthesize(user_input, assignments, results)
-        else:
-            answer = results[0]
-        if stream and len(assignments) > 1:
-            seq = yield from self._emit_event(TextDeltaEvent(delta=answer), seq)
-        yield from self._emit_event(FinalAnswerEvent(content=answer), seq)
+        yield from self._finalize_results(user_input, assignments, results, stream, seq)
 
     def _topological_layers(self, assignments: list[dict[str, str]]) -> list[list[int]]:
         """把分派清单按 worker 级依赖做 Kahn 拓扑分层。
@@ -880,85 +854,19 @@ class AutonomousOrchestrator(Orchestrator):
                     }
                 )
 
-            if self.parallel and len(injected) > 1:
+            if is_graph:
                 for item in injected:
-                    seq = yield from self._emit_event(
-                        AgentHandoffEvent(
-                            index=item["index"],
-                            worker=item["worker"],
-                            task=item["task"],
-                            layer=layer_index if is_graph else None,
-                            upstream=item["upstream"] if is_graph else None,
-                        ),
-                        seq,
-                    )
-                runnable = [{"worker": item["worker"], "task": item["task"]} for item in injected]
-                with ThreadPoolExecutor(max_workers=len(injected)) as pool:
-                    outcomes = list(pool.map(lambda a: self._run_worker(a, stream), runnable))
-                for item, (worker_events, result) in zip(injected, outcomes):
-                    for sub_event in worker_events:
-                        sub_event.seq = seq
-                        seq += 1
-                        yield sub_event
-                    results_by_index[item["index"]] = result
-                    seq = yield from self._emit_event(
-                        SubtaskEndEvent(
-                            index=item["index"],
-                            worker=item["worker"],
-                            result=result,
-                            layer=layer_index if is_graph else None,
-                        ),
-                        seq,
-                    )
+                    item["layer"] = layer_index
             else:
                 for item in injected:
-                    seq = yield from self._emit_event(
-                        AgentHandoffEvent(
-                            index=item["index"],
-                            worker=item["worker"],
-                            task=item["task"],
-                            layer=layer_index if is_graph else None,
-                            upstream=item["upstream"] if is_graph else None,
-                        ),
-                        seq,
-                    )
-                    result: str | None = None
-                    worker = self.workers.get(item["worker"])
-                    if worker is None:
-                        result = f"工人 {item['worker']} 未登记，子任务未执行。"
-                    else:
-                        for sub_event in worker.run_events(item["task"], stream=stream):
-                            sub_event.seq = seq
-                            seq += 1
-                            if isinstance(sub_event, FinalAnswerEvent):
-                                result = sub_event.content
-                            elif isinstance(sub_event, LoopAbortEvent):
-                                result = sub_event.reason
-                            yield sub_event
-                    if result is None:
-                        result = _MAX_ITERATIONS_FALLBACK
-                    results_by_index[item["index"]] = result
-                    seq = yield from self._emit_event(
-                        SubtaskEndEvent(
-                            index=item["index"],
-                            worker=item["worker"],
-                            result=result,
-                            layer=layer_index if is_graph else None,
-                        ),
-                        seq,
-                    )
+                    item["upstream"] = None
+            seq, layer_results = yield from self._execute_batch(injected, stream, seq)
+            results_by_index.update(layer_results)
 
         # 3) 汇总：按分派清单原始顺序重组结果；多子任务时整合为最终答案，
         # 单子任务直接透传（工人已流出文本，不再重复产出增量）。
         results = [results_by_index[index] for index in range(len(assignments))]
-        if len(assignments) > 1:
-            logger.info("汇总 %d 个子任务结果为最终答案", len(assignments))
-            answer = self._synthesize(user_input, assignments, results)
-        else:
-            answer = results[0]
-        if stream and len(assignments) > 1:
-            seq = yield from self._emit_event(TextDeltaEvent(delta=answer), seq)
-        yield from self._emit_event(FinalAnswerEvent(content=answer), seq)
+        yield from self._finalize_results(user_input, assignments, results, stream, seq)
 
     def _plan(self, user_input: str) -> tuple[list[dict[str, str]], list[tuple[str, str]]] | None:
         """规划：主管把任务自主编排为 DAG 计划（节点 + 依赖边）。
