@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from gearlink.exceptions import MemoryError
-from gearlink.utils.token_count import count_message_tokens, estimate_tokens
+from gearlink.utils.token_count import DEFAULT_TOKEN_COUNTER, TokenCounter
 
 if TYPE_CHECKING:
     import chromadb
@@ -292,16 +292,23 @@ class Memory(ABC):
 class ShortTermMemory(Memory):
     """短期记忆：存储最近 N 条对话"""
 
-    def __init__(self, max_tokens: int | None = None, max_message: int | None = 20) -> None:
+    def __init__(
+        self,
+        max_tokens: int | None = None,
+        max_message: int | None = 20,
+        token_counter: TokenCounter | None = None,
+    ) -> None:
         """初始化短期记忆。
 
         Args:
             max_tokens: 保留的最大 token 数；超出时从最旧消息开始移除，
                 至少保留最新一条消息。None 表示不按 token 数裁剪。
             max_message: 保留的最大消息数，超出时移除最早的消息。
+            token_counter: token 计数实现；None 时使用默认启发式计数器。
         """
         self.max_messages = max_message
         self.max_tokens = max_tokens
+        self.token_counter = token_counter if token_counter is not None else DEFAULT_TOKEN_COUNTER
         self.messages: list[dict[str, Any]] = []
 
     def add_message(self, message: dict[str, Any]) -> None:
@@ -327,11 +334,11 @@ class ShortTermMemory(Memory):
 
         # 超出 token 预算时按总量递减，从最旧消息开始移除
         if self.max_tokens:
-            total = sum(count_message_tokens(m) for m in self.messages)
+            total = sum(self.token_counter.count_message(m) for m in self.messages)
             removed = 0
             while total > self.max_tokens and len(self.messages) > 1:
                 removed_message = self.messages.pop(0)
-                total -= count_message_tokens(removed_message)
+                total -= self.token_counter.count_message(removed_message)
                 removed += 1
             if removed:
                 logger.debug(
@@ -388,6 +395,7 @@ class MemoryManager:
         system_budget_ratio: float = 1.0,
         compress_context: bool = False,
         profile_hook: ProfileHookFn | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> None:
         """初始化记忆管理器。
 
@@ -413,6 +421,8 @@ class MemoryManager:
                 `Callable[[新消息列表, 当前画像], 新画像或 None]`，在 :meth:`end_session`
                 时由管理器调用，返回非 None 时更新内部画像，后续 build_context
                 优先注入。None 表示不启用画像（现状）。具体提取逻辑由应用层注入。
+            token_counter: 上下文、检索与压缩预算使用的 token 计数实现；None 时
+                优先复用 short_term.token_counter，否则使用默认启发式计数器。
         """
         self.short_term = short_term
         self.long_term = long_term
@@ -422,6 +432,11 @@ class MemoryManager:
         self.system_budget_ratio = system_budget_ratio
         self.compress_context = compress_context
         self.profile_hook = profile_hook
+        self.token_counter = (
+            token_counter
+            if token_counter is not None
+            else getattr(short_term, "token_counter", DEFAULT_TOKEN_COUNTER)
+        )
         self.profile: dict[str, Any] | None = None
 
     def add_message(self, message: dict[str, Any]) -> None:
@@ -573,7 +588,7 @@ class MemoryManager:
                 logger.info(
                     "注入长期记忆 %d 条（约 %d token）: %s",
                     len(entries),
-                    estimate_tokens(retrieval_content),
+                    self.token_counter.count_text(retrieval_content),
                     " | ".join(_preview(entry.content) for entry in entries),
                 )
 
@@ -598,7 +613,7 @@ class MemoryManager:
             return
         messages = self.short_term.get_messages()
         threshold = int(self.max_context_tokens * COMPRESSION_THRESHOLD_RATIO)
-        total = sum(count_message_tokens(m) for m in messages)
+        total = sum(self.token_counter.count_message(m) for m in messages)
         if total <= threshold or len(messages) <= _MIN_KEEP_MESSAGES:
             return
 
@@ -627,8 +642,8 @@ class MemoryManager:
         logger.info(
             "上下文压缩: %d 条消息（约 %d token）压缩为摘要（约 %d token），保留最新 %d 条",
             len(segment),
-            sum(count_message_tokens(m) for m in segment),
-            estimate_tokens(summary),
+            sum(self.token_counter.count_message(m) for m in segment),
+            self.token_counter.count_text(summary),
             _MIN_KEEP_MESSAGES,
         )
 
@@ -693,7 +708,10 @@ class MemoryManager:
         quota = int(self.max_context_tokens * RETRIEVAL_BUDGET_RATIO)
         # 首条即使超预算也保留（软约束），其余超出即停止
         kept_indices = _keep_within_budget(
-            entries, quota, lambda entry: estimate_tokens(entry.content), always_keep_newest=True
+            entries,
+            quota,
+            lambda entry: self.token_counter.count_text(entry.content),
+            always_keep_newest=True,
         )
         kept = [entries[index] for index in kept_indices]
         logger.debug(
@@ -720,9 +738,9 @@ class MemoryManager:
         """
         system_msgs = [m for m in messages if m.get("role") == "system"]
         others = [m for m in messages if m.get("role") != "system"]
-        before_tokens = sum(count_message_tokens(m) for m in messages)
-        remaining = budget - sum(count_message_tokens(m) for m in system_msgs)
-        kept_indices = _keep_within_budget(others, remaining, count_message_tokens)
+        before_tokens = sum(self.token_counter.count_message(m) for m in messages)
+        remaining = budget - sum(self.token_counter.count_message(m) for m in system_msgs)
+        kept_indices = _keep_within_budget(others, remaining, self.token_counter.count_message)
         # 兜底：整体为空（无 system 且其余全超预算）时保留最新一条，避免空请求
         if not kept_indices and not system_msgs and others:
             kept_indices = [len(others) - 1]
@@ -735,7 +753,7 @@ class MemoryManager:
             len(system_msgs) + len(others),
             before_tokens,
             len(messages),
-            sum(count_message_tokens(m) for m in messages),
+            sum(self.token_counter.count_message(m) for m in messages),
         )
         return messages
 
@@ -763,7 +781,10 @@ class MemoryManager:
             return messages
         # 从最旧开始丢弃直至配额内，兜底保留最新一条（软约束）
         kept_indices = _keep_within_budget(
-            trimmable, quota, count_message_tokens, always_keep_newest=True
+            trimmable,
+            quota,
+            self.token_counter.count_message,
+            always_keep_newest=True,
         )
         if len(kept_indices) == len(trimmable):
             return messages

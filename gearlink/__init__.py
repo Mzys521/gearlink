@@ -18,7 +18,8 @@
 - 日志：`enable_logging` / `disable_logging`（全局日志开关）；
 - 可观测性：`TokenUsage` / `UsageTracker`（用量统计）/ `JsonlEventSink` / `jsonl_hook` /
   `load_jsonl_events`（事件落盘与回放）；
-- 工具函数：`estimate_tokens` / `count_message_tokens`。
+- token 预算：`TokenCounter` / `HeuristicTokenCounter` / `TiktokenTokenCounter` /
+  `estimate_tokens` / `count_message_tokens` / `truncate_text`。
 """
 
 from gearlink.core.agent import Agent, PlanExecuteAgent, ReactAgent
@@ -90,7 +91,15 @@ from gearlink.providers.ollama_provider import OllamaProvider
 from gearlink.providers.openai_provider import OpenAIProvider
 from gearlink.skills import Skill, SkillLoader, SkillRegistry
 from gearlink.utils.logging import disable_logging, enable_logging
-from gearlink.utils.token_count import count_message_tokens, estimate_tokens
+from gearlink.utils.token_count import (
+    DEFAULT_TOKEN_COUNTER,
+    HeuristicTokenCounter,
+    TiktokenTokenCounter,
+    TokenCounter,
+    count_message_tokens,
+    estimate_tokens,
+    truncate_text,
+)
 from gearlink.utils.usage import UsageRecord, UsageTracker
 
 # 导入工具包以触发内置工具注册（显式导入，非运行时扫描）
@@ -165,6 +174,11 @@ __all__ = [
     "disable_logging",
     "estimate_tokens",
     "count_message_tokens",
+    "truncate_text",
+    "TokenCounter",
+    "HeuristicTokenCounter",
+    "TiktokenTokenCounter",
+    "DEFAULT_TOKEN_COUNTER",
     "UsageTracker",
     "UsageRecord",
 ]

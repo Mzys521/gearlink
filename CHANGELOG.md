@@ -5,7 +5,34 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.4.2] - 2026-08-19
+
+### Added
+
+- 可注入 token 计数体系：
+  - `TokenCounter` 协议（`count_text` / `count_message` / `truncate_text`）与零依赖
+    `HeuristicTokenCounter`（默认实现，行为与旧启发式一致）；可选
+    `TiktokenTokenCounter` 基于 BPE 精确计数（`model` / `encoding_name` 二选一，
+    依赖可选 `gearlink[tokenizers]`）；
+  - `truncate_text` 预算内截断：文本与可选后缀共同受限，可见截断标记计入硬上限，
+    BPE 拼接边界逐 token 收紧保证最终上限成立；
+  - 顶层导出新增 `TokenCounter` / `HeuristicTokenCounter` / `TiktokenTokenCounter` /
+    `DEFAULT_TOKEN_COUNTER` / `truncate_text`；`estimate_tokens` /
+    `count_message_tokens` 保留为默认计数器的兼容委托；
+  - `ReactAgent`、`PlanExecuteAgent`、`ShortTermMemory` 与 `MemoryManager` 新增末尾
+    可选 `token_counter` 参数（`MemoryManager` 未传时优先复用
+    `short_term.token_counter`），默认继续使用原启发式实现；
+  - 新增免密钥示例 `examples/token_counter_demo.py` 与测试
+    `tests/test_token_counter_injection.py`；`README.md` / `docs/README.md` /
+    `docs/接口文档.md` / `docs/使用教程.md` / `docs/架构设计.md` /
+    `docs/开发方向.md` 同步更新，`TODO.md` 归档已完成项。
+
+### Fixed
+
+- 工具结果不再按 `MAX_TOOL_RESULT_TOKENS * 4` 反推字符数；中文、代码和 emoji 均按
+  注入计数器截断，且可见截断标记本身计入最终 token 硬上限。
+- `MemoryManager` 的压缩阈值、检索配额、总上下文和 system 配额现在统一使用同一
+  计数器，避免不同预算阶段口径不一致。
 
 ## [0.4.1] - 2026-08-15
 
