@@ -42,7 +42,7 @@ from gearlink.core.tool import ToolRegistry, _default_registry, set_skill_regist
 from gearlink.exceptions import GearLinkError, ProviderError
 from gearlink.providers.base import ModelProvider, ModelResponse, ToolCall
 from gearlink.skills import SkillRegistry
-from gearlink.utils.token_count import estimate_tokens
+from gearlink.utils.token_count import DEFAULT_TOKEN_COUNTER, TokenCounter, truncate_text
 
 # ------------------- 共享常量 -------------------
 
@@ -64,6 +64,9 @@ MAX_ITERATIONS = 10
 
 #: 工具结果写入记忆前的 token 估算上限，超出时截断防止撑爆上下文
 MAX_TOOL_RESULT_TOKENS = 2000
+
+#: 工具结果超预算时追加的可见标记（标记本身计入 MAX_TOOL_RESULT_TOKENS）
+_TOOL_RESULT_TRUNCATION_SUFFIX = "\n...(工具结果过长，已截断)"
 
 #: 达到最大迭代次数时的兜底文案（run / run_events / run_stream 共用）
 _MAX_ITERATIONS_FALLBACK = "已达到最大推理轮数，无法得出最终答案。"
@@ -246,6 +249,7 @@ class ReactAgent(Agent):
         tools: list[str] | None = None,
         parallel_tool_calls: bool = False,
         tool_registry: ToolRegistry | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> None:
         """初始化 Agent。
 
@@ -274,12 +278,15 @@ class ReactAgent(Agent):
             tool_registry: 工具注册表实例（开发方向 §6.4）；None 时使用模块级
                 默认注册表（向后兼容）。注入后 Agent 持有隔离的工具集与技能集，
                 同一进程内多个 Agent 互不干扰。
+            token_counter: 工具结果预算使用的 token 计数实现；None 时使用默认
+                启发式计数器。memory 为 None 时也注入默认创建的短期记忆。
         """
         super().__init__(provider=provider, hooks=hooks)
         self.retrieve_every_iteration = retrieve_every_iteration
         self.max_retries = max_retries
         self.tools = tools
         self.parallel_tool_calls = parallel_tool_calls
+        self.token_counter = token_counter if token_counter is not None else DEFAULT_TOKEN_COUNTER
         self._tool_registry = tool_registry or _default_registry
         if skill_registry is not None:
             # 登记到本 Agent 的工具注册表（实例化路径），供 load_skill 工具解析
@@ -289,7 +296,7 @@ class ReactAgent(Agent):
             if tool_registry is None:
                 set_skill_registry(skill_registry)
         if memory is None:
-            memory = ShortTermMemory(max_message=20)
+            memory = ShortTermMemory(max_message=20, token_counter=self.token_counter)
             memory.add_message({"role": "system", "content": _build_system_prompt(skill_registry)})
         self.memory = memory
         logger.debug(
@@ -588,11 +595,13 @@ class ReactAgent(Agent):
             result = self._tool_registry.call_tool(tool_call.name, arguments)
             # 将结果转为 JSON 字符串，以便统一存储
             result_text = json.dumps(result, ensure_ascii=False)
-            # 超出预算时按 4 字符/token 的启发式反推字符上限截断
-            truncated = estimate_tokens(result_text) > MAX_TOOL_RESULT_TOKENS
+            truncated = self.token_counter.count_text(result_text) > MAX_TOOL_RESULT_TOKENS
             if truncated:
-                result_text = (
-                    result_text[: MAX_TOOL_RESULT_TOKENS * 4] + "\n...(工具结果过长，已截断)"
+                result_text = truncate_text(
+                    result_text,
+                    MAX_TOOL_RESULT_TOKENS,
+                    token_counter=self.token_counter,
+                    suffix=_TOOL_RESULT_TRUNCATION_SUFFIX,
                 )
             error: str | None = None
         except GearLinkError as e:
@@ -712,6 +721,7 @@ class PlanExecuteAgent(Agent):
         max_steps: int = 5,
         hooks: list[HookFn] | None = None,
         tool_registry: ToolRegistry | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> None:
         """初始化规划-执行 Agent。
 
@@ -727,6 +737,8 @@ class PlanExecuteAgent(Agent):
             hooks: 事件回调列表（on_step 语义）；同时作用于本 Agent 与内部执行器。
             tool_registry: 工具注册表实例（开发方向 §6.4）；None 时使用模块级
                 默认注册表（向后兼容）。透传给内部执行器。
+            token_counter: 内部执行器工具结果预算使用的 token 计数实现；None 时
+                使用默认启发式计数器。
         """
         super().__init__(provider=provider, hooks=hooks)
         self.max_steps = max_steps
@@ -737,6 +749,7 @@ class PlanExecuteAgent(Agent):
             retrieve_every_iteration=retrieve_every_iteration,
             skill_registry=skill_registry,
             tool_registry=tool_registry,
+            token_counter=token_counter,
         )
         # 与执行器共享同一回调列表：基类 add_hook 对二者事件流同时生效
         self.executor._hooks = self._hooks

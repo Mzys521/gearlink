@@ -11,8 +11,6 @@
 
 ## 鲁棒性与类型治理
 
-- [ ] 定义可注入 `TokenCounter` 协议，保留启发式默认实现并支持精确 tokenizer；统一
-  上下文预算和工具结果截断逻辑。
 - [ ] 完善 `build_tool_schema`：正确表达 `Optional` / nullable，并支持参数级描述；移除
   无效的 `_nullable` 中间状态。
 - [ ] 细化 `ProviderError`：增加限流、鉴权和服务端错误子类，同时兼容现有

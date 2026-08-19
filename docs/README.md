@@ -16,6 +16,7 @@ MCP 扩展。公共 API 由 `gearlink/__init__.py` 集中导出。
 - `ReactAgent` 与 `PlanExecuteAgent` 实现单 Agent 执行策略；
 - `Orchestrator`、`DependentOrchestrator`、`AutonomousOrchestrator` 实现多 Agent 调度；
 - `ModelProvider`、`Memory`、`VectorStore` 与 `ToolRegistry` 提供可替换扩展点；
+- `TokenCounter` 统一调用前的上下文与工具结果预算，可选精确 tokenizer；
 - `AgentEvent` 是运行时观察、回放和用量统计的统一事件模型。
 
 ## 2. 安装与设置
@@ -34,6 +35,7 @@ pip install gearlink
 # 可选扩展
 pip install "gearlink[anthropic]"
 pip install "gearlink[mcp]"
+pip install "gearlink[tokenizers]"
 
 # 从源码开发
 pip install -e ".[dev]"
@@ -75,6 +77,7 @@ pytest
 | `Session` | `core/memory.py` | 可快照和恢复的会话状态 |
 | `AgentEvent` 子类 | `core/events.py` | 执行步骤、模型消息、工具调用、编排和终态事件 |
 | `UsageRecord` | `utils/usage.py` | 按标签聚合的调用次数与 token 用量 |
+| `TokenCounter` | `utils/token_count.py` | 文本/消息计数与预算内截断协议；区别于 Provider 实报的 `TokenUsage` |
 
 持久化模型使用 `to_dict()` / `from_dict()` 保证 JSON 边界清晰；字段兼容规则和异常
 行为见[架构设计：序列化约定](架构设计.md#11-序列化约定)。
@@ -89,6 +92,7 @@ pytest
 4. 工具注册、Schema 与调度
 5. Provider 与标准响应模型
 6. MCP、技能、可观测性、日志和异常
+7. Token 计数、预算与精确 tokenizer 注入
 
 顶层 `gearlink.__all__` 是公共导出的最终依据；未导出的内部函数不承诺兼容性。
 

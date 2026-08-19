@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gearlink"
-version = "0.4.1"
+version = "0.4.2"
 description = "轻量级 Agent 框架：多策略编排（ReAct / 规划-执行 / 多 Agent 协作）+ 模型/记忆/工具三可插拔 + 技能扩展"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,9 @@ anthropic = [
 ]
 mcp = [
     "mcp>=1.0",
+]
+tokenizers = [
+    "tiktoken>=0.7",
 ]
 dev = [
     "pytest>=8.0",

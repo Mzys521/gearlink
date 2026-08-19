@@ -14,6 +14,7 @@
 - **可观测性**：`TokenUsage` 用量透传（`ModelMessageEvent.usage`）、`JsonlEventSink` 事件落盘与离线回放、`UsageTracker` 按标签聚合用量与成本估算；
 - **模型可插拔**：面向 `ModelProvider` 抽象编程，内置 OpenAI 兼容实现（OpenAI / DeepSeek / 国产兼容接口）、本地 `OllamaProvider`（无需密钥）与 `AnthropicProvider`；支持可重试错误的指数退避重试（`max_retries`）与结构化输出（`response_format`）；
 - **记忆可插拔**：短期滑窗 `ShortTermMemory`、向量长期记忆 `LongTermMemory`（可注入自定义 `embedding_function`，存储后端经 `VectorStore` 协议抽象，支持检索阈值过滤与 MMR 去冗余）、以及组合两者的 `MemoryManager`（上下文预算、会话摘要沉淀与动态压缩、用户画像钩子、检索注入）；`snapshot()` / `restore()` 支持会话断线恢复；
+- **Token 预算可插拔**：`TokenCounter` 统一短期记忆、上下文、检索和工具结果预算；默认启发式零依赖，可选 `TiktokenTokenCounter` 精确 BPE 计数；
 - **工具注册表**：「注册表 + JSON Schema + 调度器」三件套，`register_tool` 显式登记，`build_tool_schema` 从函数签名自动生成 schema；支持工具白名单与并行执行；
 - **MCP 接入**：`McpClient` 把外部 MCP 服务器的工具映射进注册表（`mcp_<server>_<tool>`），`core/` 无感知复用；
 - **技能扩展**：渐进式披露的 `SKILL.md` 知识包，`ReactAgent(skill_registry=...)` 注入，模型经 `load_skill` 工具按需加载完整指令。
@@ -25,6 +26,7 @@ pip install gearlink              # 从 PyPI 安装（推荐）
 # 或安装可选依赖：
 pip install gearlink[anthropic]   # Anthropic Claude 支持
 pip install gearlink[mcp]         # MCP 外部工具支持
+pip install gearlink[tokenizers]  # tiktoken 精确 token 计数
 pip install gearlink[dev]         # 开发依赖（pytest / ruff）
 
 # 开发安装（从源码）：
@@ -354,7 +356,7 @@ disable_logging()  # 关闭：恢复静默
 | 可观测性  | `TokenUsage`、`UsageTracker`、`UsageRecord`、`JsonlEventSink`、`jsonl_hook`、`load_jsonl_events`                                                                                                                                                                                         |
 | 异常    | `GearLinkError`、`ProviderError`、`ToolError`、`ToolNotFoundError`、`MemoryError`、`SkillError`、`SkillNotFoundError`、`SkillLoadError`、`SkillValidationError`、`SkillExecutionError`                                                                                                       |
 | 日志    | `enable_logging`、`disable_logging`                                                                                                                                                                                                                                                  |
-| 工具函数  | `estimate_tokens`、`count_message_tokens`                                                                                                                                                                                                                                            |
+| Token 预算 | `TokenCounter`、`HeuristicTokenCounter`、`TiktokenTokenCounter`、`DEFAULT_TOKEN_COUNTER`、`estimate_tokens`、`count_message_tokens`、`truncate_text`                                                                                                                                    |
 
 ## 示例
 
@@ -367,6 +369,7 @@ disable_logging()  # 关闭：恢复静默
 - [examples/session\_restore\_demo.py](examples/session_restore_demo.py)：会话 `snapshot` / `restore` 断线恢复（免密钥）；
 - [examples/observability\_demo.py](examples/observability_demo.py)：token 用量透传 + JSONL 事件落盘回放 + `UsageTracker` 成本估算（免密钥）；
 - [examples/memory\_advanced\_demo.py](examples/memory_advanced_demo.py)：上下文摘要压缩 + 用户画像 + 检索阈值/MMR + 自定义 `VectorStore`（免密钥，无需 chromadb）；
+- [examples/token\_counter\_demo.py](examples/token_counter_demo.py)：可注入 token 计数、预算内截断与可选 tiktoken 精确计数（免密钥）；
 - [examples/orchestrator\_demo.py](examples/orchestrator_demo.py)：`Orchestrator` 主管-工人多 Agent 协作（免密钥）；
 - [examples/dependent\_orchestrator\_demo.py](examples/dependent_orchestrator_demo.py)：`DependentOrchestrator` 工人依赖流水线编排（免密钥）；
 - [examples/autonomous\_orchestrator\_demo.py](examples/autonomous_orchestrator_demo.py)：`AutonomousOrchestrator` 模型自主 DAG 串并行编排（免密钥）；
